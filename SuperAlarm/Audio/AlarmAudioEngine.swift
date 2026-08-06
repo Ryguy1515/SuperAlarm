@@ -48,6 +48,8 @@ public final class AlarmAudioEngine: ObservableObject {
     private var lockVolume = false
     /// Target app-level gain once any ramp completes.
     private var targetGain: Float = 1.0
+    /// Progress through the gradual-volume ramp.
+    private var rampStep = 0
     private var observersInstalled = false
 
     private init() {
@@ -205,8 +207,10 @@ public final class AlarmAudioEngine: ObservableObject {
         guard let player = alarmPlayer else { return }
         player.setVolume(targetGain * 0.15, fadeDuration: 0.3)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            guard let self, let player = self.alarmPlayer else { return }
-            player.setVolume(self.targetGain, fadeDuration: 0.4)
+            Task { @MainActor in
+                guard let self, let player = self.alarmPlayer else { return }
+                player.setVolume(self.targetGain, fadeDuration: 0.4)
+            }
         }
     }
 
@@ -226,7 +230,10 @@ public final class AlarmAudioEngine: ObservableObject {
 
         let tick = 0.25
         let steps = max(1, Int(duration / tick))
-        var step = 0
+        // Held as instance state rather than a captured local: the Task's
+        // closure is @Sendable, and mutating a captured var from one is
+        // rejected by the compiler.
+        rampStep = 0
 
         let timer = Timer(timeInterval: tick, repeats: true) { [weak self] timer in
             Task { @MainActor in
@@ -234,12 +241,12 @@ public final class AlarmAudioEngine: ObservableObject {
                     timer.invalidate()
                     return
                 }
-                step += 1
+                self.rampStep += 1
                 // Ease in so the first few seconds are genuinely gentle.
-                let progress = Float(step) / Float(steps)
+                let progress = Float(self.rampStep) / Float(steps)
                 let eased = progress * progress
                 player.volume = min(target, 0.05 + (target - 0.05) * eased)
-                if step >= steps {
+                if self.rampStep >= steps {
                     player.volume = target
                     timer.invalidate()
                     self.rampTimer = nil
@@ -357,7 +364,7 @@ public final class AlarmAudioEngine: ObservableObject {
 
         // Phone calls and other interruptions: resume as soon as we are
         // allowed to. An alarm that gives up after a call is useless.
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
             queue: .main
@@ -366,7 +373,7 @@ public final class AlarmAudioEngine: ObservableObject {
         }
 
         // Unplugging headphones normally pauses playback. Not here.
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil,
             queue: .main
@@ -375,7 +382,7 @@ public final class AlarmAudioEngine: ObservableObject {
         }
 
         // Another app taking the session out from under us.
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification,
             object: nil,
             queue: .main

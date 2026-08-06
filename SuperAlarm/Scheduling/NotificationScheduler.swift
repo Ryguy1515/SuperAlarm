@@ -91,19 +91,19 @@ public final class NotificationScheduler: @unchecked Sendable {
 
     public func registerCategories() {
         let snooze = UNNotificationAction(
-            title: "Snooze",
             identifier: AlarmNotification.actionSnooze,
+            title: "Snooze",
             options: []
         )
         // Turning the alarm off has to open the app so the mission can run.
         let stop = UNNotificationAction(
-            title: "Turn off",
             identifier: AlarmNotification.actionStop,
+            title: "Turn off",
             options: [.foreground]
         )
         let imUp = UNNotificationAction(
-            title: "I'm up",
             identifier: AlarmNotification.actionImUp,
+            title: "I'm up",
             options: [.foreground]
         )
 
@@ -362,9 +362,7 @@ public final class NotificationScheduler: @unchecked Sendable {
                     AlarmNotification.keyFireDate: occurrence.date.timeIntervalSince1970,
                     AlarmNotification.keyChainIndex: index,
                 ]
-                if #available(iOS 15.0, *) {
-                    content.relevanceScore = 1.0
-                }
+                content.relevanceScore = 1.0
 
                 let components = Calendar.current.dateComponents(
                     [.year, .month, .day, .hour, .minute, .second], from: fireDate

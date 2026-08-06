@@ -43,6 +43,9 @@ public class CaptureController: NSObject, ObservableObject {
     /// configuration transaction.
     func configureOutputs() {}
 
+    /// Configuration happens on the main actor — it is a one-off and touches
+    /// `@Published` state — while `startRunning()` is dispatched off it,
+    /// because that call blocks.
     public func start() async {
         guard await CameraAccess.request() else {
             errorMessage = "Camera access is off. Enable it in Settings › Privacy › Camera."
@@ -50,25 +53,24 @@ public class CaptureController: NSObject, ObservableObject {
         }
         errorMessage = nil
 
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if !self.isConfigured {
-                self.configureSession()
-                self.isConfigured = true
-            }
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
-            Task { @MainActor in self.isRunning = self.session.isRunning }
+        if !isConfigured {
+            configureSession()
+            isConfigured = true
         }
+
+        let session = self.session
+        sessionQueue.async {
+            if !session.isRunning { session.startRunning() }
+        }
+        isRunning = true
     }
 
     public func stop() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.session.isRunning { self.session.stopRunning() }
-            Task { @MainActor in self.isRunning = false }
+        let session = self.session
+        sessionQueue.async {
+            if session.isRunning { session.stopRunning() }
         }
+        isRunning = false
     }
 
     private func configureSession() {
@@ -82,7 +84,7 @@ public class CaptureController: NSObject, ObservableObject {
             session.canAddInput(input)
         else {
             session.commitConfiguration()
-            Task { @MainActor in self.errorMessage = "No usable camera was found." }
+            errorMessage = "No usable camera was found."
             return
         }
         session.addInput(input)

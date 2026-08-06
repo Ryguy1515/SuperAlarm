@@ -224,11 +224,11 @@ struct SlideToUnlock: View {
                         )
                         .frame(width: 90)
                         .offset(x: shimmer * geometry.size.width)
-                        .mask(
+                        .mask {
                             Text(title)
                                 .font(SAFont.emphasis(17))
                                 .frame(maxWidth: .infinity)
-                        )
+                        }
                         .allowsHitTesting(false)
                     }
 

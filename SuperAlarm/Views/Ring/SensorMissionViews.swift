@@ -23,7 +23,11 @@ struct MotionMissionView: View {
         }
         .padding(.horizontal, SAMetrics.screenPadding)
         .onAppear(perform: start)
-        .onDisappear { engine.stop() }
+        .onDisappear {
+            engine.onComplete = nil
+            engine.onIncrement = nil
+            engine.stop()
+        }
     }
 
     private var counter: some View {
@@ -86,6 +90,8 @@ struct MotionMissionView: View {
 
     private func start() {
         let goal = session.settings.effectiveGoal
+        // Capture the session object rather than the view that holds it.
+        let session = self.session
         engine.onComplete = { session.passRound() }
         engine.onIncrement = { _ in HapticEngine.shared.impact(.light) }
 
@@ -150,7 +156,9 @@ struct BarcodeMissionView: View {
         }
         .task {
             controller.expectedPayload = session.settings.barcodePayload
-            controller.onMatch = { _ in
+            let session = self.session
+            controller.onMatch = { [weak controller] _ in
+                guard let controller else { return }
                 controller.stop()
                 session.passRound()
                 if !session.isComplete {
@@ -160,7 +168,10 @@ struct BarcodeMissionView: View {
             }
             await controller.start()
         }
-        .onDisappear { controller.stop() }
+        .onDisappear {
+            controller.onMatch = nil
+            controller.stop()
+        }
     }
 }
 
@@ -185,7 +196,9 @@ struct ObjectMissionView: View {
             if let id = session.settings.objectImageID {
                 controller.loadReference(imageID: id)
             }
-            controller.onMatch = {
+            let session = self.session
+            controller.onMatch = { [weak controller] in
+                guard let controller else { return }
                 controller.stop()
                 session.passRound()
                 if !session.isComplete {
@@ -195,7 +208,10 @@ struct ObjectMissionView: View {
             }
             await controller.start()
         }
-        .onDisappear { controller.stop() }
+        .onDisappear {
+            controller.onMatch = nil
+            controller.stop()
+        }
     }
 
     @ViewBuilder

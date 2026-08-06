@@ -263,6 +263,7 @@ final class MissionLogicTests: XCTestCase {
 
     // MARK: Tone resolution
 
+    @MainActor
     func testRandomToneIdentifiersRoundTrip() {
         for category in SoundCategory.allCases {
             let id = ToneResolver.randomID(for: category)

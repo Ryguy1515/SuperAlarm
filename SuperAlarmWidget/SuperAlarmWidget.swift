@@ -333,6 +333,7 @@ struct NextAlarmWidgetView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
     private var inline: some View {
         if let first {
             Label("\(timeText(first.fireDate)) · \(first.label)", systemImage: "alarm.fill")

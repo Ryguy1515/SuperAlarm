@@ -45,9 +45,19 @@ struct MissionRunnerView: View {
             }
         }
         .onAppear {
-            session.onComplete = { onComplete() }
-            session.onTimeout = { onGiveUp() }
+            // Capturing the closures into locals first avoids capturing the
+            // view — which owns the session — and leaking it along with its
+            // one-second timer.
+            let complete = onComplete
+            let giveUp = onGiveUp
+            session.onComplete = { complete() }
+            session.onTimeout = { giveUp() }
             session.startTimerIfNeeded()
+        }
+        .onDisappear {
+            session.onComplete = nil
+            session.onTimeout = nil
+            session.stopTimer()
         }
         .onReceive(tick) { _ in
             elapsed = Int(Date().timeIntervalSince(session.startedAt))
@@ -482,7 +492,9 @@ struct MemoryMissionView: View {
         isShowingPattern = true
 
         DispatchQueue.main.asyncAfter(deadline: .now() + round.previewSeconds) {
-            withAnimation { isShowingPattern = false }
+            Task { @MainActor in
+                withAnimation { isShowingPattern = false }
+            }
         }
     }
 
@@ -502,7 +514,7 @@ struct MemoryMissionView: View {
             session.registerFailure()
             // Wrong tile restarts the round with a brand new pattern.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                startRound()
+                Task { @MainActor in startRound() }
             }
         }
     }

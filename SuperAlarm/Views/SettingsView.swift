@@ -375,24 +375,15 @@ struct DiagnosticsView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     SACard {
+                        // Built from data rather than as 17 literal children:
+                        // ViewBuilder only has overloads up to 10.
                         VStack(alignment: .leading, spacing: 12) {
-                            row("Alarm mechanism", coordinator.systemBackendName)
-                            SADivider(inset: 0)
-                            row("System alarms authorised", coordinator.systemAlarmsAuthorized ? "Yes" : "No")
-                            SADivider(inset: 0)
-                            row("Notifications authorised", coordinator.notificationsAuthorized ? "Yes" : "No")
-                            SADivider(inset: 0)
-                            row("Pending notifications", "\(coordinator.pendingNotificationCount)")
-                            SADivider(inset: 0)
-                            row("Enabled alarms", "\(store.enabledAlarms.count)")
-                            SADivider(inset: 0)
-                            row("Last rebuild", coordinator.lastRebuildAt.map(timeString) ?? "Never")
-                            SADivider(inset: 0)
-                            row("Shared container", StorageLocation.hasSharedContainer ? "Yes" : "No (widget data unavailable)")
-                            SADivider(inset: 0)
-                            row("Runtime phase", runtime.phase.rawValue)
-                            SADivider(inset: 0)
-                            row("Bundled sounds", missingTones.isEmpty ? "All present" : "\(missingTones.count) missing")
+                            ForEach(Array(diagnosticRows.enumerated()), id: \.offset) { index, item in
+                                row(item.title, item.value)
+                                if index < diagnosticRows.count - 1 {
+                                    SADivider(inset: 0)
+                                }
+                            }
                         }
                     }
 
@@ -447,6 +438,20 @@ struct DiagnosticsView: View {
             missingTones = SoundBundle.missingTones()
             await coordinator.refreshAuthorizationStatus()
         }
+    }
+
+    private var diagnosticRows: [(title: String, value: String)] {
+        [
+            ("Alarm mechanism", coordinator.systemBackendName),
+            ("System alarms authorised", coordinator.systemAlarmsAuthorized ? "Yes" : "No"),
+            ("Notifications authorised", coordinator.notificationsAuthorized ? "Yes" : "No"),
+            ("Pending notifications", "\(coordinator.pendingNotificationCount)"),
+            ("Enabled alarms", "\(store.enabledAlarms.count)"),
+            ("Last rebuild", coordinator.lastRebuildAt.map(timeString) ?? "Never"),
+            ("Shared container", StorageLocation.hasSharedContainer ? "Yes" : "No (widget data unavailable)"),
+            ("Runtime phase", runtime.phase.rawValue),
+            ("Bundled sounds", missingTones.isEmpty ? "All present" : "\(missingTones.count) missing"),
+        ]
     }
 
     private func row(_ title: String, _ value: String) -> some View {

@@ -40,13 +40,14 @@ public final class SystemVolume {
         let view = MPVolumeView(frame: CGRect(x: -4_000, y: -4_000, width: 200, height: 40))
         view.alpha = 0.001
         view.isUserInteractionEnabled = false
-        view.showsRouteButton = false
         window.addSubview(view)
         volumeView = view
 
         // The slider is created asynchronously after the view is added.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.slider = view.subviews.compactMap { $0 as? UISlider }.first
+            Task { @MainActor in
+                self?.slider = view.subviews.compactMap { $0 as? UISlider }.first
+            }
         }
         #endif
     }
@@ -66,8 +67,10 @@ public final class SystemVolume {
         // Setting the value on the next runloop turn is required; setting it
         // synchronously right after the view is added is silently ignored.
         DispatchQueue.main.async {
-            target.value = clamped
-            target.sendActions(for: .valueChanged)
+            Task { @MainActor in
+                target.value = clamped
+                target.sendActions(for: .valueChanged)
+            }
         }
         return true
         #else
@@ -87,7 +90,7 @@ public final class SystemVolume {
             let progress = Float(step) / Float(steps)
             let value = start + (target - start) * progress
             DispatchQueue.main.asyncAfter(deadline: .now() + interval * Double(step)) { [weak self] in
-                self?.set(value)
+                Task { @MainActor in self?.set(value) }
             }
         }
     }

@@ -193,7 +193,9 @@ final class AlarmKitBackend: SystemAlarmBackend {
             schedule = .fixed(nextFire)
         }
 
-        return await schedule(
+        // `self.` is required: the local `schedule` constant above shadows the
+        // method of the same name.
+        return await self.schedule(
             id: UUID(),
             appAlarm: alarm,
             schedule: schedule,

@@ -437,9 +437,12 @@ struct AlarmEditorView: View {
         var alarm = draft
         if !alarm.mission.isReady { alarm.mission = MissionSettings() }
         store.update(alarm)
+        let runtime = self.runtime
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-            runtime.startRinging(alarm: alarm, occurrence: Date())
+            Task { @MainActor in
+                runtime.startRinging(alarm: alarm, occurrence: Date())
+            }
         }
     }
 }

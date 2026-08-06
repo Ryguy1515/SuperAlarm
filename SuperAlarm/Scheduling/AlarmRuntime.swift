@@ -158,19 +158,19 @@ public final class AlarmRuntime: ObservableObject {
 
     private func installObservers() {
         #if canImport(UIKit)
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.handleForeground() }
         }
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.handleBackground() }
         }
         #endif
 
-        NotificationCenter.default.addObserver(
+        _ = NotificationCenter.default.addObserver(
             forName: .alarmAudioNeedsRestart, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.restartAudioIfRinging() }

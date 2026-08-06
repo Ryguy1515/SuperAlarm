@@ -31,8 +31,8 @@ struct StatsView: View {
             .navigationTitle("Stats")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !store.history.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !store.history.isEmpty {
                         Button {
                             showingClearConfirm = true
                         } label: {

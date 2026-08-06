@@ -170,9 +170,11 @@ public final class WeatherService: NSObject, ObservableObject {
 
             // Never leave the caller hanging if the fix does not arrive.
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-                guard let self, let pending = self.pendingContinuation else { return }
-                self.pendingContinuation = nil
-                pending.resume(returning: self.locationManager.location)
+                Task { @MainActor in
+                    guard let self, let pending = self.pendingContinuation else { return }
+                    self.pendingContinuation = nil
+                    pending.resume(returning: self.locationManager.location)
+                }
             }
         }
     }
