@@ -6,9 +6,9 @@ import AppIntents
 import SwiftUI
 import os.log
 
-// `AlarmKit.Alarm` and this app's own `Alarm` model share a name, so both are
-// referred to explicitly throughout this file.
-private typealias AppAlarm = SuperAlarm.Alarm
+// AlarmKit declares its own `Alarm`, so this file never uses the bare name:
+// `AppAlarm` (declared in Models/Alarm.swift) is this app's model, and
+// `AlarmKit.Alarm` is the framework's.
 
 // MARK: - Metadata
 

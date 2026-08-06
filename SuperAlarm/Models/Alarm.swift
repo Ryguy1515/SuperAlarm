@@ -538,6 +538,14 @@ public struct Alarm: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// Unambiguous spelling of this app's own `Alarm`.
+///
+/// AlarmKit also declares a type called `Alarm`, so any file importing that
+/// framework has two candidates in scope. Declaring the alias here — in a file
+/// that does not import AlarmKit — resolves it at the declaration site, which
+/// is more robust than qualifying with the module name at every use.
+public typealias AppAlarm = Alarm
+
 // MARK: - Colour tags
 
 public enum AlarmPalette {
