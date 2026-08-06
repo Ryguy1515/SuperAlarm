@@ -86,6 +86,16 @@ public final class AlarmRuntime: ObservableObject {
 
     // MARK: Internal state
 
+    /// What completing the current mission should actually do. Snoozing and
+    /// confirming the wake-up check can both be configured to require the
+    /// mission, so the mission screen is reused for all three.
+    private enum MissionIntent {
+        case dismiss
+        case snooze
+        case confirmAwake
+    }
+
+    private var missionIntent: MissionIntent = .dismiss
     private var ticker: Timer?
     private var currentRecord: WakeRecord?
     private var handledOccurrences: [String: Date] = [:]
@@ -387,6 +397,21 @@ public final class AlarmRuntime: ObservableObject {
     public func snooze() {
         guard let alarm = activeAlarm, canSnooze else { return }
 
+        // Snoozing can be made exactly as much work as getting up.
+        if alarm.snooze.requireMissionToSnooze,
+           alarm.mission.type != .none,
+           alarm.mission.isReady,
+           phase == .ringing {
+            beginMission(intent: .snooze)
+            return
+        }
+
+        performSnooze()
+    }
+
+    private func performSnooze() {
+        guard let alarm = activeAlarm else { return }
+
         let interval = alarm.snooze.interval(forSnoozeIndex: snoozeCount)
         let wakeAt = Date().addingTimeInterval(interval)
 
@@ -435,6 +460,11 @@ public final class AlarmRuntime: ObservableObject {
             return
         }
 
+        beginMission(intent: .dismiss)
+    }
+
+    private func beginMission(intent: MissionIntent) {
+        missionIntent = intent
         missionStartedAt = Date()
         phase = .mission
         persistState()
@@ -444,6 +474,7 @@ public final class AlarmRuntime: ObservableObject {
     public func cancelMission() {
         guard phase == .mission else { return }
         accrueMissionTime()
+        missionIntent = .dismiss
         phase = .ringing
         persistState()
     }
@@ -452,10 +483,21 @@ public final class AlarmRuntime: ObservableObject {
         missionFailures += 1
     }
 
-    /// The mission was completed — the alarm can finally stop.
+    /// The mission was completed. What that earns depends on why it was run.
     public func completeMission() {
         accrueMissionTime()
-        dismiss()
+
+        switch missionIntent {
+        case .dismiss:
+            missionIntent = .dismiss
+            dismiss()
+        case .snooze:
+            missionIntent = .dismiss
+            performSnooze()
+        case .confirmAwake:
+            missionIntent = .dismiss
+            finishWakeCheck()
+        }
     }
 
     private func accrueMissionTime() {
@@ -529,6 +571,24 @@ public final class AlarmRuntime: ObservableObject {
     /// The "I'm up" button.
     public func confirmAwake() {
         guard phase == .wakeCheckRinging || phase == .wakeCheckPending else { return }
+        guard let alarm = activeAlarm else {
+            teardown()
+            return
+        }
+
+        // Tapping a button is easy to do without waking up, so the check can
+        // be configured to demand the mission again.
+        if alarm.wakeUpCheck.requireMission,
+           alarm.mission.type != .none,
+           alarm.mission.isReady {
+            beginMission(intent: .confirmAwake)
+            return
+        }
+
+        finishWakeCheck()
+    }
+
+    private func finishWakeCheck() {
         audio.stopAlarm()
         currentRecord?.wakeUpCheckPassed = true
         finishRecord(outcome: .dismissed)
