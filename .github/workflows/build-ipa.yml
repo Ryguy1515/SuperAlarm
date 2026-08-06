@@ -61,6 +61,9 @@ jobs:
       - name: Preflight
         run: node tools/preflight.js
 
+      - name: Resolve static member references
+        run: node tools/symbol-check.js
+
       - name: Install XcodeGen
         run: |
           set -euo pipefail
