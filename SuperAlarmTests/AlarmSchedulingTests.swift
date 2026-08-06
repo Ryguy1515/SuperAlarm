@@ -27,13 +27,22 @@ final class AlarmSchedulingTests: XCTestCase {
         return calendar.date(from: components)!
     }
 
+    /// Guards the fixtures below. Every weekday assertion in this file assumes
+    /// 6 August 2026 is a Thursday; if that is wrong, the rest is meaningless.
+    func testCalendarFixtureIsCorrect() {
+        XCTAssertEqual(calendar.component(.weekday, from: date(2026, 8, 6, 12, 0)), Weekday.thursday.rawValue)
+        XCTAssertEqual(calendar.component(.weekday, from: date(2026, 8, 7, 12, 0)), Weekday.friday.rawValue)
+        XCTAssertEqual(calendar.component(.weekday, from: date(2026, 8, 8, 12, 0)), Weekday.saturday.rawValue)
+        XCTAssertEqual(calendar.component(.weekday, from: date(2026, 8, 3, 12, 0)), Weekday.monday.rawValue)
+    }
+
     // MARK: One-shot
 
     func testOneShotFiresLaterToday() {
         var alarm = Alarm(hour: 7, minute: 0)
         alarm.repeatMode = .once
 
-        // Wednesday 6 August 2026, 06:00.
+        // Thursday 6 August 2026, 06:00.
         let now = date(2026, 8, 6, 6, 0)
         let next = alarm.nextFireDate(after: now, calendar: calendar)
 
@@ -77,21 +86,32 @@ final class AlarmSchedulingTests: XCTestCase {
         alarm.repeatMode = .weekly
         alarm.repeatDays = [.monday, .wednesday, .friday]
 
-        // Wednesday 6 August 2026 at 08:00 — today's slot has passed.
+        // Thursday 6 August 2026 at 08:00. Thursday is not selected, so the
+        // next hit is Friday.
         let now = date(2026, 8, 6, 8, 0)
         let next = alarm.nextFireDate(after: now, calendar: calendar)
 
-        // 7 August 2026 is a Friday.
         XCTAssertEqual(next, date(2026, 8, 7, 7, 0))
     }
 
     func testWeeklyIncludesTodayWhenTimeHasNotPassed() {
         var alarm = Alarm(hour: 7, minute: 0)
         alarm.repeatMode = .weekly
-        alarm.repeatDays = [.monday, .wednesday, .friday]
+        // Thursday is selected, and it is only 05:00, so today still counts.
+        alarm.repeatDays = [.monday, .thursday, .friday]
 
         let now = date(2026, 8, 6, 5, 0)
         XCTAssertEqual(alarm.nextFireDate(after: now, calendar: calendar), date(2026, 8, 6, 7, 0))
+    }
+
+    func testWeeklySkipsTodayOnceTheTimeHasPassed() {
+        var alarm = Alarm(hour: 7, minute: 0)
+        alarm.repeatMode = .weekly
+        alarm.repeatDays = [.monday, .thursday, .friday]
+
+        // Same Thursday, but 08:00 — today's 07:00 slot is gone.
+        let now = date(2026, 8, 6, 8, 0)
+        XCTAssertEqual(alarm.nextFireDate(after: now, calendar: calendar), date(2026, 8, 7, 7, 0))
     }
 
     func testWeeklyOccurrencesAreAscendingAndOnSelectedDaysOnly() {
