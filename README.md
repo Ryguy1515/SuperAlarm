@@ -143,11 +143,23 @@ Views/         Design system + every screen
 node tools/generate-sounds.js   # 32 tones + 5 sleep sounds + keep-alive loop
 node tools/verify-sounds.js     # header, duration, loudness and loop-seam checks
 node tools/generate-icon.js     # 1024px app icon
+node tools/preflight.js         # static checks that need no Swift toolchain
+node tools/symbol-check.js      # resolves every MyType.member reference
 ```
 
 On a Mac: `brew install xcodegen && xcodegen generate && open SuperAlarm.xcodeproj`.
 
-Generated audio and the icon are gitignored — the scripts are the source of truth, and CI regenerates them on every run. Tests run in CI against a simulator and cover scheduling maths, mission logic, statistics and persistence migration.
+Generated audio and the icon are gitignored — the scripts are the source of truth, and CI regenerates them on every run.
+
+### What is verified where
+
+This project was written on Windows, where no Swift compiler can run: Swift for Windows links through MSVC and needs Visual Studio plus the Windows SDK, and the toolchain itself needs an elevated install. So verification is split.
+
+**Locally, with no compiler** — `preflight.js` checks brace balance, duplicate top-level declarations, widget-target isolation, per-file framework imports, tone identifiers resolving against the generated catalog, required Info.plist keys, the absence of an entitlements file, and GitHub workflow block-scalar indentation. `symbol-check.js` indexes every type and member this project declares and resolves every `MyType.member` reference against it. Both run in CI too, so they fail in seconds rather than after a full Xcode cycle.
+
+**In CI, with a real compiler** — the actual build, and 71 unit tests covering scheduling maths, mission generators, statistics and streaks, and persistence migration from older records.
+
+`tools/core-tests.js` assembles the platform-independent core (models, mission generators, statistics) into a throwaway SwiftPM package and runs the portable subset of the test suite. It needs a Swift toolchain and MSVC, so it does nothing on a bare Windows box — it exists for anyone who has those, or on Linux.
 
 ### Changing the bundle identifier
 
