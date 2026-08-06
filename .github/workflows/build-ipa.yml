@@ -64,6 +64,9 @@ jobs:
       - name: Resolve static member references
         run: node tools/symbol-check.js
 
+      - name: Switch exhaustiveness and initialiser labels
+        run: node tools/typecheck-lite.js
+
       - name: Install XcodeGen
         run: |
           set -euo pipefail

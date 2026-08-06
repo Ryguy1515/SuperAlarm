@@ -145,6 +145,7 @@ node tools/verify-sounds.js     # header, duration, loudness and loop-seam check
 node tools/generate-icon.js     # 1024px app icon
 node tools/preflight.js         # static checks that need no Swift toolchain
 node tools/symbol-check.js      # resolves every MyType.member reference
+node tools/typecheck-lite.js    # switch exhaustiveness + initialiser labels
 ```
 
 On a Mac: `brew install xcodegen && xcodegen generate && open SuperAlarm.xcodeproj`.
@@ -155,7 +156,13 @@ Generated audio and the icon are gitignored — the scripts are the source of tr
 
 This project was written on Windows, where no Swift compiler can run: Swift for Windows links through MSVC and needs Visual Studio plus the Windows SDK, and the toolchain itself needs an elevated install. So verification is split.
 
-**Locally, with no compiler** — `preflight.js` checks brace balance, duplicate top-level declarations, widget-target isolation, per-file framework imports, tone identifiers resolving against the generated catalog, required Info.plist keys, the absence of an entitlements file, and GitHub workflow block-scalar indentation. `symbol-check.js` indexes every type and member this project declares and resolves every `MyType.member` reference against it. Both run in CI too, so they fail in seconds rather than after a full Xcode cycle.
+**Locally, with no compiler** — three tools, all of which also run in CI so they fail in seconds rather than after a full Xcode cycle:
+
+- `preflight.js` — brace balance, duplicate top-level declarations, widget-target isolation, per-file framework imports, tone identifiers resolving against the generated catalog, required Info.plist keys, absence of an entitlements file, and GitHub workflow block-scalar indentation.
+- `symbol-check.js` — indexes every type and member the project declares, then resolves every `MyType.member` reference against that index.
+- `typecheck-lite.js` — two checks a compiler would normally do: switch statements over project enums are exhaustive, and initialiser calls match a declared signature (accounting for default values, trailing closures and inits declared in extensions).
+
+Each was validated against deliberately broken code to confirm it actually fires rather than passing vacuously.
 
 **In CI, with a real compiler** — the actual build, and 71 unit tests covering scheduling maths, mission generators, statistics and streaks, and persistence migration from older records.
 
