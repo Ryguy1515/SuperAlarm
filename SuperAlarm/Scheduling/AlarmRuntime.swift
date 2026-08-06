@@ -109,6 +109,10 @@ public final class AlarmRuntime: ObservableObject {
     /// running. Beyond this the occurrence is logged as missed.
     private let catchUpWindow: TimeInterval = 30 * 60
 
+    /// Grace period between the wake-up check's deadline and the scheduled
+    /// re-ring that backs it up.
+    private static let wakeCheckReRingBuffer: TimeInterval = 10
+
     public init() {}
 
     // MARK: - Lifecycle
@@ -531,8 +535,22 @@ public final class AlarmRuntime: ObservableObject {
             phase = .wakeCheckPending
             persistState()
 
-            Task { await coordinator.scheduleWakeUpCheck(alarm: alarm, at: fireAt) }
-            log.info("Wake-up check armed for \(fireAt, privacy: .public)")
+            // The confirmation window is enforced by a scheduled alarm, not by
+            // a timer in this process. Between dismissing the alarm and the
+            // check firing the app will usually be suspended, and a suspended
+            // app cannot re-ring anything. Arming the re-ring up front means
+            // ignoring the check has the same consequence as failing it.
+            // The small buffer gives the in-app path a head start to cancel
+            // this if the app happens to be running when the window expires,
+            // so the two can never alert on top of each other.
+            let reRingAt = fireAt.addingTimeInterval(
+                TimeInterval(alarm.wakeUpCheck.confirmWindowSeconds) + Self.wakeCheckReRingBuffer
+            )
+            Task {
+                await coordinator.scheduleWakeUpCheck(alarm: alarm, at: fireAt)
+                await coordinator.scheduleSnooze(alarm: alarm, at: reRingAt)
+            }
+            log.info("Wake-up check armed for \(fireAt, privacy: .public), re-ring at \(reRingAt, privacy: .public)")
         } else {
             finishRecord(outcome: .dismissed)
             teardown()
@@ -594,7 +612,13 @@ public final class AlarmRuntime: ObservableObject {
         finishRecord(outcome: .dismissed)
 
         if let alarm = activeAlarm {
-            Task { await coordinator.cancelWakeUpCheck(alarmID: alarm.id) }
+            // Stand down both the check itself and the re-ring armed behind it.
+            coordinator.standDownBackstops(alarmID: alarm.id)
+            Task {
+                await coordinator.cancelWakeUpCheck(alarmID: alarm.id)
+                await coordinator.cancelSnooze(alarmID: alarm.id)
+                await coordinator.silence(alarmID: alarm.id)
+            }
         }
         teardown()
         log.info("Wake-up check confirmed")
@@ -612,6 +636,11 @@ public final class AlarmRuntime: ObservableObject {
         snoozeCount = 0
         phase = .ringing
         firedAt = Date()
+
+        // This process is handling the re-ring, so stand down the scheduled
+        // one that was armed as the backup.
+        Task { await coordinator.cancelSnooze(alarmID: alarm.id) }
+
         beginAudio(for: alarm)
         persistState()
 
