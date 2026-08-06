@@ -1,0 +1,192 @@
+name: Build IPA
+
+# Builds an unsigned, device-ready .ipa on a GitHub-hosted macOS runner, so the
+# whole project can be developed on Windows. Download the artifact, then sign
+# and install it with Sideloadly or AltStore over USB.
+#
+# macOS runner minutes are free and unlimited on public repositories.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle identifier to build with"
+        required: false
+        default: "com.superalarm.app"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Pinned rather than macos-latest: AlarmKit needs the iOS 26 SDK, and the
+    # meaning of "latest" moves without warning.
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    env:
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id || 'com.superalarm.app' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          echo "Available SDKs:"
+          xcodebuild -showsdks | grep -i ios || true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Generate audio and icon assets
+        run: |
+          set -euo pipefail
+          node tools/generate-sounds.js
+          node tools/generate-icon.js
+
+      - name: Verify generated audio
+        run: node tools/verify-sounds.js
+
+      - name: Install XcodeGen
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          if [ "$BUNDLE_ID" != "com.superalarm.app" ]; then
+            echo "Using custom bundle id: $BUNDLE_ID"
+            /usr/bin/sed -i '' "s|com\.superalarm\.app|$BUNDLE_ID|g" project.yml
+          fi
+          xcodegen generate
+          echo "--- Targets ---"
+          xcodebuild -list -project SuperAlarm.xcodeproj
+
+      # ------------------------------------------------------------- tests
+      - name: Pick a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+import json, sys
+devices = json.load(sys.stdin)['devices']
+best = None
+for runtime, items in devices.items():
+    if 'iOS' not in runtime:
+        continue
+    for device in items:
+        if 'iPhone' in device.get('name', ''):
+            best = (runtime, device)
+if best is None:
+    sys.exit('No iPhone simulator available')
+print(best[1]['udid'])
+")
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          echo "Using simulator $UDID"
+
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project SuperAlarm.xcodeproj \
+            -scheme SuperAlarm \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath build/TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      # ------------------------------------------------------------ archive
+      - name: Build unsigned device archive
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project SuperAlarm.xcodeproj \
+            -scheme SuperAlarm \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/SuperAlarm.xcarchive \
+            clean archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM=""
+
+      # `xcodebuild exportArchive` cannot emit an unsigned build, so the
+      # Payload wrapper is assembled by hand. This is a real arm64 iphoneos
+      # binary, not a simulator slice.
+      - name: Package .ipa
+        run: |
+          set -euo pipefail
+          APP="build/SuperAlarm.xcarchive/Products/Applications/SuperAlarm.app"
+          test -d "$APP" || { echo "Archive did not produce an app bundle"; exit 1; }
+
+          echo "--- Architectures ---"
+          lipo -info "$APP/SuperAlarm" || true
+
+          rm -rf build/Payload build/*.ipa
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+
+          ( cd build && zip -qry SuperAlarm.ipa Payload )
+
+          # Some Windows sideloading tools mis-sign app extensions. Ship a
+          # second copy with the widget stripped so there is always a build
+          # that installs cleanly.
+          rm -rf build/Payload/SuperAlarm.app/PlugIns
+          ( cd build && zip -qry SuperAlarm-no-widget.ipa Payload )
+
+          rm -rf build/Payload
+          ls -lh build/*.ipa
+
+      - name: Sanity-check the packaged app
+        run: |
+          set -euo pipefail
+          rm -rf build/check && mkdir -p build/check
+          unzip -q build/SuperAlarm.ipa -d build/check
+          APP="build/check/Payload/SuperAlarm.app"
+
+          echo "--- Info.plist keys that matter ---"
+          for key in NSAlarmKitUsageDescription UIBackgroundModes NSCameraUsageDescription NSMotionUsageDescription NSFaceIDUsageDescription; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Info.plist" >/dev/null 2>&1; then
+              echo "ok   $key"
+            else
+              echo "MISSING $key"; exit 1
+            fi
+          done
+
+          echo "--- Alarm tones present at bundle root ---"
+          # UNNotificationSound only looks at the bundle root, so a tone tucked
+          # into a subdirectory would silently never play.
+          COUNT=$(find "$APP" -maxdepth 1 -name '*.wav' | wc -l | tr -d ' ')
+          echo "$COUNT wav files at bundle root"
+          test "$COUNT" -ge 30 || { echo "Alarm tones are missing from the bundle root"; exit 1; }
+
+          test -f "$APP/AppIcon60x60@2x.png" -o -d "$APP/Assets.car" || echo "note: icon asset not found as expected"
+          echo "Package looks good."
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuperAlarm-ipa
+          path: build/*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/TestResults.xcresult
+          retention-days: 7
+          if-no-files-found: ignore

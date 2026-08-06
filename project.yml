@@ -1,0 +1,121 @@
+# XcodeGen spec. Generates SuperAlarm.xcodeproj from this file so the whole
+# project is reproducible from source and there is no 3,000-line pbxproj to
+# hand-merge.
+#
+#   brew install xcodegen && xcodegen generate
+#
+# Deliberately ships NO entitlements file. App Groups, push and iCloud are all
+# unavailable to free Apple Developer "personal teams", and requesting an
+# entitlement the profile cannot grant makes signing fail outright. Everything
+# the app needs — AlarmKit, background audio, Live Activities — is configured
+# through Info.plist keys instead, which free signing allows.
+
+name: SuperAlarm
+
+options:
+  bundleIdPrefix: com.superalarm
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+  defaultConfig: Release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Portrait iPhone only.
+    TARGETED_DEVICE_FAMILY: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    ENABLE_BITCODE: "NO"
+    ALWAYS_SEARCH_USER_PATHS: "NO"
+    CLANG_ENABLE_MODULES: "YES"
+    SWIFT_EMIT_LOC_STRINGS: "YES"
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      GCC_OPTIMIZATION_LEVEL: "0"
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      VALIDATE_PRODUCT: "YES"
+
+targets:
+  # ---------------------------------------------------------------- the app
+  SuperAlarm:
+    type: application
+    platform: iOS
+    sources:
+      - path: SuperAlarm
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_NAME: SuperAlarm
+        PRODUCT_MODULE_NAME: SuperAlarm
+        PRODUCT_BUNDLE_IDENTIFIER: com.superalarm.app
+        INFOPLIST_FILE: SuperAlarm/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: "NO"
+        CODE_SIGN_ENTITLEMENTS: ""
+    dependencies:
+      - target: SuperAlarmWidgetExtension
+        embed: true
+        codeSign: true
+
+  # ------------------------------------------------------------- the widget
+  SuperAlarmWidgetExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: SuperAlarmWidget
+        excludes:
+          - "Info.plist"
+      # The widget only needs the shared storage layer, not the whole app.
+      - path: SuperAlarm/Store/SharedStorage.swift
+    settings:
+      base:
+        PRODUCT_NAME: SuperAlarmWidget
+        PRODUCT_MODULE_NAME: SuperAlarmWidget
+        PRODUCT_BUNDLE_IDENTIFIER: com.superalarm.app.widget
+        INFOPLIST_FILE: SuperAlarmWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        SKIP_INSTALL: "YES"
+        CODE_SIGN_ENTITLEMENTS: ""
+
+  # --------------------------------------------------------------- the tests
+  SuperAlarmTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: SuperAlarmTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.superalarm.app.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+    dependencies:
+      - target: SuperAlarm
+
+schemes:
+  SuperAlarm:
+    build:
+      targets:
+        SuperAlarm: all
+        SuperAlarmWidgetExtension: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - SuperAlarmTests
+    archive:
+      config: Release

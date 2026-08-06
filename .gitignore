@@ -1,0 +1,33 @@
+# Generated audio and icon assets.
+# These are produced from source by tools/generate-sounds.js and
+# tools/generate-icon.js, which both CI and a local build run before Xcode.
+# Keeping ~64 MB of WAV files out of git keeps the repo small and the
+# generators as the single source of truth.
+SuperAlarm/Resources/Sounds/*.wav
+SuperAlarm/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+
+# Generated Xcode project — rebuild with `xcodegen generate`.
+*.xcodeproj/
+*.xcworkspace/
+
+# Build output
+build/
+DerivedData/
+*.ipa
+*.xcarchive
+*.dSYM
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Node
+node_modules/
+npm-debug.log*
