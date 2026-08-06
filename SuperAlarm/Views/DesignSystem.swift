@@ -257,7 +257,7 @@ public struct SARow<Trailing: View>: View {
         subtitle: String? = nil,
         iconTint: Color = SAColor.accent,
         showsChevron: Bool = true,
-        @ViewBuilder trailing: () -> Trailing = { EmptyView() }
+        @ViewBuilder trailing: () -> Trailing
     ) {
         self.icon = icon
         self.title = title
@@ -305,6 +305,27 @@ public struct SARow<Trailing: View>: View {
         .padding(.vertical, 12)
         .padding(.horizontal, 16)
         .contentShape(Rectangle())
+    }
+}
+
+public extension SARow where Trailing == EmptyView {
+    /// Rows with nothing on the trailing edge — the common case for a row
+    /// that just navigates somewhere.
+    init(
+        icon: String,
+        title: String,
+        subtitle: String? = nil,
+        iconTint: Color = SAColor.accent,
+        showsChevron: Bool = true
+    ) {
+        self.init(
+            icon: icon,
+            title: title,
+            subtitle: subtitle,
+            iconTint: iconTint,
+            showsChevron: showsChevron,
+            trailing: { EmptyView() }
+        )
     }
 }
 
