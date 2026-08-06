@@ -105,6 +105,10 @@ Two advertised behaviours cannot be reproduced exactly, and the app is honest ab
 - **"App deletion prevention while alarm is ringing."** No third-party iOS app can block its own deletion. Doing so requires `ManagedSettings.denyAppRemoval`, which needs the **Family Controls** entitlement — Apple approval, paid account, and it would break free-account signing entirely. What this build does instead is arguably stronger: alarms are owned by the system, so they keep firing even if the app is closed, and a **backstop chain** of follow-up alarms is armed the moment one starts, cancelled only when a mission is genuinely completed.
 - **"Power-off prevention."** Android-only in the original, via an Accessibility Service. iOS has no equivalent API.
 
+One deliverable is deliberately left out:
+
+- **No separate Apple Watch app.** The original ships a watchOS companion. Adding a watchOS target means a second bundle identifier and provisioning profile inside the same `.ipa`, which is the most common cause of sideloading failures on Windows with a free Apple ID — it would put the thing you actually need, the iPhone app, at risk. It is also the one component that could not be tested here. It costs you very little: AlarmKit already mirrors alarms to a paired Apple Watch automatically, so an alarm still sounds and can be stopped from your wrist without a bundled watch app.
+
 Also worth knowing:
 
 - **Widget data needs an App Group**, which free personal teams cannot use. Under free signing the widgets install and render but show *"Open SuperAlarm"* instead of live data. With a paid account, add the App Group capability and it lights up. The app detects this and degrades cleanly.

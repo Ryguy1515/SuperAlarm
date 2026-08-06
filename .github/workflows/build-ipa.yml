@@ -55,6 +55,12 @@ jobs:
       - name: Verify generated audio
         run: node tools/verify-sounds.js
 
+      # Cheap static checks that fail in seconds rather than after a full
+      # Xcode cycle: duplicate declarations, missing imports, widget-target
+      # purity, unresolvable tone identifiers.
+      - name: Preflight
+        run: node tools/preflight.js
+
       - name: Install XcodeGen
         run: |
           set -euo pipefail
@@ -72,26 +78,27 @@ jobs:
           xcodebuild -list -project SuperAlarm.xcodeproj
 
       # ------------------------------------------------------------- tests
+      # Simulator names and iOS versions drift between runner images, so the
+      # device is discovered rather than hard-coded. `tail` rather than `head`
+      # because `head` closing the pipe early trips `pipefail`.
       - name: Pick a simulator
         id: sim
         run: |
           set -euo pipefail
-          UDID=$(xcrun simctl list devices available -j | python3 -c "
-import json, sys
-devices = json.load(sys.stdin)['devices']
-best = None
-for runtime, items in devices.items():
-    if 'iOS' not in runtime:
-        continue
-    for device in items:
-        if 'iPhone' in device.get('name', ''):
-            best = (runtime, device)
-if best is None:
-    sys.exit('No iPhone simulator available')
-print(best[1]['udid'])
-")
+          LIST=$(xcrun simctl list devices available)
+          echo "$LIST"
+          LINE=$(printf '%s\n' "$LIST" | grep -E '^[[:space:]]+iPhone' | tail -n 1 || true)
+          if [ -z "$LINE" ]; then
+            echo "No iPhone simulator is available on this runner"
+            exit 1
+          fi
+          UDID=$(printf '%s\n' "$LINE" | grep -oiE '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' | tail -n 1)
+          if [ -z "$UDID" ]; then
+            echo "Could not read a UDID from: $LINE"
+            exit 1
+          fi
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-          echo "Using simulator $UDID"
+          echo "Using simulator $UDID ($LINE)"
 
       - name: Run unit tests
         run: |

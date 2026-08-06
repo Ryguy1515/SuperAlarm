@@ -2,7 +2,6 @@ import SwiftUI
 
 struct AlarmListView: View {
     @EnvironmentObject private var store: AlarmStore
-    @EnvironmentObject private var runtime: AlarmRuntime
     @EnvironmentObject private var coordinator: AlarmCoordinator
 
     @State private var editingAlarm: Alarm?
