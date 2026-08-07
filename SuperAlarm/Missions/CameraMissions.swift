@@ -39,7 +39,7 @@ public class CaptureController: NSObject, ObservableObject {
 
     private var isConfigured = false
 
-    /// Subclasses attach their outputs here. Called on `sessionQueue` inside a
+    /// Subclasses attach their outputs here, from inside the session's
     /// configuration transaction.
     func configureOutputs() {}
 
@@ -54,7 +54,10 @@ public class CaptureController: NSObject, ObservableObject {
         errorMessage = nil
 
         if !isConfigured {
-            configureSession()
+            // Only latch success. Marking it configured after a failure would
+            // mean a camera that was unavailable once — say the permission
+            // sheet was still up — could never be retried.
+            guard configureSession() else { return }
             isConfigured = true
         }
 
@@ -73,7 +76,9 @@ public class CaptureController: NSObject, ObservableObject {
         isRunning = false
     }
 
-    private func configureSession() {
+    /// Returns false when no usable camera could be attached, leaving
+    /// `errorMessage` set for the caller to surface.
+    private func configureSession() -> Bool {
         session.beginConfiguration()
         session.sessionPreset = .high
 
@@ -85,12 +90,13 @@ public class CaptureController: NSObject, ObservableObject {
         else {
             session.commitConfiguration()
             errorMessage = "No usable camera was found."
-            return
+            return false
         }
         session.addInput(input)
 
         configureOutputs()
         session.commitConfiguration()
+        return true
     }
 }
 

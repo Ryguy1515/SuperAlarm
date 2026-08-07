@@ -447,7 +447,9 @@ struct DiagnosticsView: View {
             ("Notifications authorised", coordinator.notificationsAuthorized ? "Yes" : "No"),
             ("Pending notifications", "\(coordinator.pendingNotificationCount)"),
             ("Enabled alarms", "\(store.enabledAlarms.count)"),
-            ("Last rebuild", coordinator.lastRebuildAt.map(timeString) ?? "Never"),
+            // Closure form rather than `.map(timeString)`: passing a
+            // main-actor-isolated method as a plain function value warns.
+            ("Last rebuild", coordinator.lastRebuildAt.map { timeString($0) } ?? "Never"),
             ("Shared container", StorageLocation.hasSharedContainer ? "Yes" : "No (widget data unavailable)"),
             ("Runtime phase", runtime.phase.rawValue),
             ("Bundled sounds", missingTones.isEmpty ? "All present" : "\(missingTones.count) missing"),

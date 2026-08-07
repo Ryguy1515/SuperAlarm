@@ -434,9 +434,13 @@ struct AlarmEditorView: View {
     /// Rings this alarm immediately so the whole flow can be rehearsed at a
     /// sensible hour rather than discovered at 6am.
     private func testAlarm() {
-        var alarm = draft
-        if !alarm.mission.isReady { alarm.mission = MissionSettings() }
-        store.update(alarm)
+        var prepared = draft
+        if !prepared.mission.isReady { prepared.mission = MissionSettings() }
+        store.update(prepared)
+
+        // Bound immutably before the dispatch: capturing a `var` in a
+        // @Sendable closure is a concurrency diagnostic.
+        let alarm = prepared
         let runtime = self.runtime
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
