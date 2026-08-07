@@ -89,9 +89,10 @@ struct MotionMissionView: View {
     }
 
     private func start() {
-        let goal = session.settings.effectiveGoal
-        // Capture the session object rather than the view that holds it.
+        // Bound to a local first so the callbacks capture the session object
+        // rather than the view that owns it.
         let session = self.session
+        let goal = session.settings.effectiveGoal
         engine.onComplete = { session.passRound() }
         engine.onIncrement = { _ in HapticEngine.shared.impact(.light) }
 
@@ -155,8 +156,11 @@ struct BarcodeMissionView: View {
             }
         }
         .task {
-            controller.expectedPayload = session.settings.barcodePayload
+            // Locals, because a capture list cannot name a property directly
+            // and these must be bound before first use.
+            let controller = self.controller
             let session = self.session
+            controller.expectedPayload = session.settings.barcodePayload
             controller.onMatch = { [weak controller] _ in
                 guard let controller else { return }
                 controller.stop()
@@ -193,10 +197,11 @@ struct ObjectMissionView: View {
             }
         }
         .task {
+            let controller = self.controller
+            let session = self.session
             if let id = session.settings.objectImageID {
                 controller.loadReference(imageID: id)
             }
-            let session = self.session
             controller.onMatch = { [weak controller] in
                 guard let controller else { return }
                 controller.stop()

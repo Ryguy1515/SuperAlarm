@@ -404,5 +404,66 @@ for (const [file, code] of sources) {
 }
 console.log(`  ok    ${CHECKABLE.length} struct types with explicit initialisers checked`);
 
+// -------------------------- 4. locals shadowing a name used earlier
+
+console.log('\nLocals used before their declaration');
+
+/** The innermost brace block containing `index`. */
+function enclosingBlock(code, index) {
+  let depth = 0;
+  let open = -1;
+  for (let i = index; i >= 0; i--) {
+    if (code[i] === '}') depth++;
+    else if (code[i] === '{') {
+      if (depth === 0) { open = i; break; }
+      depth--;
+    }
+  }
+  if (open === -1) return null;
+
+  depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '{') depth++;
+    else if (code[i] === '}') {
+      depth--;
+      if (depth === 0) return { start: open + 1, end: i };
+    }
+  }
+  return null;
+}
+
+for (const [file, code] of sources) {
+  // Statement-level `let x = …` / `var x = …` only. `if let` and `guard let`
+  // scope to their own body, so they cannot shadow earlier uses.
+  const pattern = /(^|\n)([ \t]*)(?:let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^\n=]+)?=/g;
+  let match;
+  while ((match = pattern.exec(code)) !== null) {
+    const name = match[3];
+    const declIndex = match.index + match[1].length;
+
+    const block = enclosingBlock(code, declIndex);
+    if (!block) continue;
+
+    const before = code.slice(block.start, declIndex);
+    // A bare use of the name: not a member access, not part of a longer
+    // identifier, and not an argument label or dictionary key (`name:`),
+    // which are not references to the variable at all.
+    const bareUse = new RegExp(`(?<![.\\w$])${name}(?![\\w$])(?!\\s*:)`);
+    if (!bareUse.test(before)) continue;
+
+    // Skip when the earlier occurrence is itself a declaration of the same
+    // name in a nested scope (a loop variable, say).
+    const earlierDecl = new RegExp(`(?:let|var|func|for)\\s+${name}\\b`);
+    if (earlierDecl.test(before)) continue;
+
+    fail(
+      `${rel(file)}:${lineOf(code, declIndex)}  local '${name}' is declared here ` +
+      `but the same name is already used earlier in this scope — Swift rejects this ` +
+      `as "use of local variable before its declaration"`
+    );
+  }
+}
+console.log('  ok    scope shadowing checked');
+
 console.log(`\n${failures} failure(s).`);
 process.exit(failures ? 1 : 0);

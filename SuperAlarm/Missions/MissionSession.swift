@@ -54,11 +54,14 @@ public final class MissionSession: ObservableObject {
 
     public func startTimerIfNeeded() {
         guard settings.timeLimitSeconds > 0, timer == nil else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+        // Named distinctly from the `timer` property: a local of the same name
+        // would shadow it for the whole scope, making the guard above a use
+        // before declaration.
+        let countdownTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        RunLoop.main.add(countdownTimer, forMode: .common)
+        timer = countdownTimer
     }
 
     private func tick() {
