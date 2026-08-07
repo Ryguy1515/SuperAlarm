@@ -61,6 +61,16 @@ git branch -M main
 Write-Host "`nPushing to $RepoUrl" -ForegroundColor Cyan
 Write-Host "A browser sign-in may appear the first time." -ForegroundColor DarkGray
 git push -u origin main
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Push failed." -ForegroundColor Red
+    Write-Host "If this said 'terminal prompts disabled', git could not open a sign-in." -ForegroundColor Yellow
+    Write-Host "Run this once in your own terminal window to authenticate:" -ForegroundColor Yellow
+    Write-Host "  cd $PWD" -ForegroundColor White
+    Write-Host "  git push -u origin main" -ForegroundColor White
+    Write-Host "After that the credential is cached and pushes work unattended." -ForegroundColor Yellow
+    exit 1
+}
 
 # Turn the clone URL into a web URL for the Actions tab.
 $web = $RepoUrl -replace '\.git$', ''
