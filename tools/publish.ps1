@@ -40,7 +40,13 @@ $dirty = git status --porcelain
 if (-not [string]::IsNullOrWhiteSpace($dirty)) {
     Write-Host "`nUncommitted changes found; committing them." -ForegroundColor Yellow
     git add -A
-    git commit -m "Local changes before publishing"
+    # user.name/user.email may not be set globally, which would abort the
+    # commit. Supply them for this one command only.
+    $name = git config user.name
+    $email = git config user.email
+    if ([string]::IsNullOrWhiteSpace($name)) { $name = 'SuperAlarm' }
+    if ([string]::IsNullOrWhiteSpace($email)) { $email = 'superalarm@localhost' }
+    git -c "user.name=$name" -c "user.email=$email" commit -m "Local changes before publishing"
 }
 
 if (git remote | Select-String -Pattern '^origin$' -Quiet) {
