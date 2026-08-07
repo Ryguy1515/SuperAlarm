@@ -160,7 +160,7 @@ This project was written on Windows, where no Swift compiler can run: Swift for 
 
 - `preflight.js` — brace balance, duplicate top-level declarations, widget-target isolation, per-file framework imports, tone identifiers resolving against the generated catalog, required Info.plist keys, absence of an entitlements file, and GitHub workflow block-scalar indentation.
 - `symbol-check.js` — indexes every type and member the project declares, then resolves every `MyType.member` reference against that index.
-- `typecheck-lite.js` — two checks a compiler would normally do: switch statements over project enums are exhaustive, and initialiser calls match a declared signature (accounting for default values, trailing closures and inits declared in extensions).
+- `typecheck-lite.js` — four checks a compiler would normally do: switch statements over project enums are exhaustive; initialiser calls match a declared signature (accounting for default values, trailing closures and inits declared in extensions); no local shadows a property name that was already used earlier in the same scope; and no `ViewBuilder` container exceeds its ten-child limit.
 
 Each was validated against deliberately broken code to confirm it actually fires rather than passing vacuously.
 

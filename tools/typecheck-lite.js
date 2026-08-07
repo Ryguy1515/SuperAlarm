@@ -465,5 +465,91 @@ for (const [file, code] of sources) {
 }
 console.log('  ok    scope shadowing checked');
 
+// ------------------------------------- 5. ViewBuilder child-count limit
+
+console.log('\nViewBuilder child counts');
+
+// `ViewBuilder.buildBlock` has overloads for 0 through 10 children only.
+const VIEW_CONTAINERS = [
+  'VStack', 'HStack', 'ZStack', 'Group', 'Form', 'Section', 'List',
+  'LazyVStack', 'LazyHStack', 'LazyVGrid', 'LazyHGrid', 'ScrollView', 'NavigationStack',
+];
+const MAX_CHILDREN = 10;
+
+/**
+ * Counts top-level statements in a ViewBuilder block. A statement starts on a
+ * line where brace, paren and bracket nesting are all back to zero and the
+ * first character does not continue the previous expression.
+ */
+function countChildren(body) {
+  let braces = 0;
+  let parens = 0;
+  let brackets = 0;
+  let count = 0;
+
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim();
+    const atTopLevel = braces === 0 && parens === 0 && brackets === 0;
+
+    if (
+      atTopLevel &&
+      line !== '' &&
+      !line.startsWith('.') &&      // modifier continuation
+      !line.startsWith('}') &&
+      !line.startsWith(')') &&
+      !line.startsWith(']') &&
+      !line.startsWith(',') &&
+      !line.startsWith('?') &&
+      !line.startsWith(':') &&
+      !/^(else|case|default)\b/.test(line) &&
+      !/^(let|var)\s/.test(line)     // declarations are not children
+    ) {
+      count++;
+    }
+
+    for (const ch of rawLine) {
+      if (ch === '{') braces++;
+      else if (ch === '}') braces--;
+      else if (ch === '(') parens++;
+      else if (ch === ')') parens--;
+      else if (ch === '[') brackets++;
+      else if (ch === ']') brackets--;
+    }
+  }
+  return count;
+}
+
+for (const [file, code] of sources) {
+  for (const container of VIEW_CONTAINERS) {
+    const pattern = new RegExp(`(?:^|[^A-Za-z0-9_.])${container}\\s*(\\(|\\{)`, 'g');
+    let match;
+    while ((match = pattern.exec(code)) !== null) {
+      // Find the trailing closure's opening brace.
+      let braceIndex;
+      if (match[1] === '{') {
+        braceIndex = code.indexOf('{', match.index);
+      } else {
+        const span = parenSpan(code, code.indexOf('(', match.index));
+        if (!span) continue;
+        const after = code.slice(span.close + 1);
+        if (!/^\s*\{/.test(after)) continue;   // no trailing closure
+        braceIndex = span.close + 1 + after.indexOf('{');
+      }
+
+      const block = blockAt(code, braceIndex - 1);
+      if (!block) continue;
+
+      const children = countChildren(block.body);
+      if (children > MAX_CHILDREN) {
+        fail(
+          `${rel(file)}:${lineOf(code, match.index)}  ${container} has ${children} children — ` +
+          `ViewBuilder supports at most ${MAX_CHILDREN}`
+        );
+      }
+    }
+  }
+}
+console.log(`  ok    ${VIEW_CONTAINERS.length} container types checked`);
+
 console.log(`\n${failures} failure(s).`);
 process.exit(failures ? 1 : 0);
