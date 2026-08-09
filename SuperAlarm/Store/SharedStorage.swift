@@ -73,12 +73,42 @@ public final class JSONFileStore: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    /// ISO8601 with milliseconds. The stock `.iso8601` strategy truncates to
+    /// whole seconds, so a date would not survive a write/read round trip —
+    /// which matters because `createdAt` is the tiebreaker when two alarms
+    /// are set for the same time.
+    private static let isoWithMillis: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// Fallback for anything written before milliseconds were kept.
+    private static let isoWholeSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     public init() {
         encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(JSONFileStore.isoWithMillis.string(from: date))
+        }
+
         decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            if let date = JSONFileStore.isoWithMillis.date(from: text) { return date }
+            if let date = JSONFileStore.isoWholeSeconds.date(from: text) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unrecognised date format: \(text)"
+            )
+        }
     }
 
     public func load<T: Decodable>(_ type: T.Type, from fileName: String) -> T? {

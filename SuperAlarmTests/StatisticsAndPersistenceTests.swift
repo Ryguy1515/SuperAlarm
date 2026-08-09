@@ -181,15 +181,33 @@ final class StatisticsTests: XCTestCase {
 
 final class PersistenceTests: XCTestCase {
 
+    /// Mirrors `JSONFileStore`'s strategy, which keeps milliseconds so that
+    /// dates survive a round trip intact.
+    private static let iso: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     private func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(PersistenceTests.iso.string(from: date))
+        }
         return encoder
     }
 
     private func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            guard let date = PersistenceTests.iso.date(from: text) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: text)
+            }
+            return date
+        }
         return decoder
     }
 
@@ -211,11 +229,31 @@ final class PersistenceTests: XCTestCase {
         alarm.preAlarm.isEnabled = true
         alarm.voiceBriefing.isEnabled = true
         alarm.colorTag = 3
+        // Pinned to a millisecond boundary. `Date()` carries sub-millisecond
+        // precision that no text format preserves, so comparing it for exact
+        // equality after a round trip would be testing the formatter's
+        // resolution rather than the model.
+        alarm.createdAt = Date(timeIntervalSince1970: 1_770_000_000)
 
         let data = try makeEncoder().encode(alarm)
         let restored = try makeDecoder().decode(Alarm.self, from: data)
 
         XCTAssertEqual(restored, alarm)
+    }
+
+    func testDatesKeepMillisecondPrecisionThroughTheStore() throws {
+        // Guards the reason the strategy is custom rather than `.iso8601`:
+        // whole-second truncation would silently reorder alarms created in
+        // the same second, since `createdAt` is the sort tiebreaker.
+        var alarm = Alarm(hour: 7, minute: 0)
+        alarm.createdAt = Date(timeIntervalSince1970: 1_770_000_000.125)
+
+        let restored = try makeDecoder().decode(Alarm.self, from: try makeEncoder().encode(alarm))
+        XCTAssertEqual(
+            restored.createdAt.timeIntervalSince1970,
+            1_770_000_000.125,
+            accuracy: 0.0005
+        )
     }
 
     func testAlarmDecodesFromMinimalJSONWithSensibleDefaults() throws {
