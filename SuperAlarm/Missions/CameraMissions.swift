@@ -1,5 +1,7 @@
 import Foundation
-import AVFoundation
+// AVCaptureSession is not Sendable but is safe to hand to the session queue,
+// which is the pattern Apple's own sample code uses.
+@preconcurrency import AVFoundation
 import Combine
 import Vision
 import CoreImage

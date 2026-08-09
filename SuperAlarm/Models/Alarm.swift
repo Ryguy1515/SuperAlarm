@@ -6,8 +6,9 @@ import Foundation
 /// setting in a later build never invalidates alarms already on the device.
 extension KeyedDecodingContainer {
     func decodeOr<T: Decodable>(_ key: Key, _ fallback: T) -> T {
-        if let value = try? decodeIfPresent(T.self, forKey: key) { return value ?? fallback }
-        return fallback
+        // `try?` flattens the optional, so this is already `T?`: nil covers
+        // both a missing key and a decode failure.
+        (try? decodeIfPresent(T.self, forKey: key)) ?? fallback
     }
 }
 

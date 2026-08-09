@@ -148,27 +148,41 @@ jobs:
       # Written to the job summary as well as the console: the summary is
       # exposed through the public check-runs API, so the failure can be read
       # without repository credentials.
+      # Emitted as ::error:: workflow commands, which become check-run
+      # annotations. Annotations are readable through the public API without
+      # any credentials, unlike job logs and artifacts.
       - name: Compiler error summary
         if: failure()
         run: |
+          emit() {
+            local title="$1"; local body="$2"
+            [ -z "$body" ] && body="(nothing matched)"
+            body="${body//'%'/%25}"
+            body="${body//$'\n'/%0A}"
+            body="${body//$'\r'/%0D}"
+            echo "::error title=${title}::${body}"
+          }
+
+          STRIP='s|/Users/runner/work/SuperAlarm/SuperAlarm/||g'
+
+          ERRORS=$(grep -hE "error:" build/*.log 2>/dev/null | sed "$STRIP" | sort -u | head -n 30 || true)
+          emit "Compiler errors" "$ERRORS"
+
+          TESTS=$(grep -hE "XCTAssertion|XCTAssert.* failed|Test Case .* failed|Testing failed|Failing tests" build/*.log 2>/dev/null | sed "$STRIP" | sort -u | head -n 30 || true)
+          emit "Test failures" "$TESTS"
+
+          LINKER=$(grep -hE "Undefined symbol|ld: |linker command failed|Signing|error: Unable" build/*.log 2>/dev/null | sed "$STRIP" | sort -u | head -n 20 || true)
+          emit "Linker and signing" "$LINKER"
+
+          TAIL=$(tail -n 45 build/*.log 2>/dev/null | sed "$STRIP" || true)
+          emit "Last 45 log lines" "$TAIL"
+
           {
             echo "## Build failure"
-            echo ""
-            echo "### Errors"
-            echo '```'
-            grep -hE "error:" build/*.log 2>/dev/null | sed 's|/Users/runner/work/SuperAlarm/SuperAlarm/||g' | sort -u | head -n 60 || echo "(none matched)"
-            echo '```'
-            echo ""
-            echo "### Test failures"
-            echo '```'
-            grep -hE "XCTAssert|Test Case .* failed|failed \(" build/*.log 2>/dev/null | sed 's|/Users/runner/work/SuperAlarm/SuperAlarm/||g' | head -n 40 || echo "(none matched)"
-            echo '```'
-            echo ""
-            echo "### Last 40 lines"
-            echo '```'
-            tail -n 40 build/*.log 2>/dev/null || echo "(no logs)"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '### Errors';  echo '```'; echo "$ERRORS"; echo '```'
+            echo '### Tests';   echo '```'; echo "$TESTS";  echo '```'
+            echo '### Tail';    echo '```'; echo "$TAIL";   echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # `xcodebuild exportArchive` cannot emit an unsigned build, so the
       # Payload wrapper is assembled by hand. This is a real arm64 iphoneos
