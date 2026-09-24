@@ -54,11 +54,12 @@ struct MotionMissionView: View {
 
             Text(engine.hint.isEmpty ? session.settings.type.tagline : engine.hint)
                 .font(SAFont.headline(19))
-                .foregroundStyle(SAColor.textPrimary)
+                .foregroundStyle(engine.isMoving ? SAColor.success : SAColor.textPrimary)
                 .multilineTextAlignment(.center)
+                .animation(.easeInOut(duration: 0.2), value: engine.isMoving)
 
             if session.settings.type == .walk {
-                Text("Keep the phone with you. Steps are counted by the motion sensor, not by shaking.")
+                Text("Keep the phone with you. Steps arrive in batches a few seconds behind your feet, so keep walking.")
                     .font(SAFont.body(13))
                     .foregroundStyle(SAColor.textTertiary)
                     .multilineTextAlignment(.center)
@@ -97,7 +98,10 @@ struct MotionMissionView: View {
         engine.onIncrement = { _ in HapticEngine.shared.impact(.light) }
 
         switch session.settings.type {
-        case .walk: engine.start(.steps(goal: goal))
+        // Steps are counted from the moment the mission began, not from when
+        // this view appeared, so a rebuilt view or a relaunch resumes the
+        // count rather than resetting it.
+        case .walk: engine.start(.steps(goal: goal), since: session.startedAt)
         case .shake: engine.start(.shake(goal: goal))
         case .pushup: engine.start(.reps(goal: goal, kind: .pushup))
         case .squat: engine.start(.reps(goal: goal, kind: .squat))

@@ -30,6 +30,9 @@ public final class MotionMissionEngine: ObservableObject {
     @Published public private(set) var isRunning = false
     /// Live coaching text, e.g. "Go lower" or "Keep walking".
     @Published public private(set) var hint: String = ""
+    /// True while the phone is physically moving — the walking mission shows
+    /// this immediately, before the pedometer's first batch lands.
+    @Published public private(set) var isMoving = false
 
     public var progress: Double {
         goal <= 0 ? 0 : min(1, Double(count) / Double(goal))
@@ -51,6 +54,14 @@ public final class MotionMissionEngine: ObservableObject {
 
     private var mode: Mode?
     private var hasCompleted = false
+
+    // Step counting state
+    private var stepModel = StepCountModel(goal: 1)
+    private var stepStart = Date()
+    private var stepQueryTimer: Timer?
+    /// Set when this engine triggered the first-ever Motion permission
+    /// prompt, so a denial mid-mission is reported rather than hanging.
+    private var awaitingMotionPermission = false
 
     // Shake detection state
     private var shakeArmed = true
@@ -75,18 +86,25 @@ public final class MotionMissionEngine: ObservableObject {
 
     // MARK: - Lifecycle
 
-    public func start(_ mode: Mode) {
+    /// Starts a mission.
+    ///
+    /// `since` is the moment the mission began. The walking mission counts
+    /// steps from that instant, so a mission that survives a relaunch (or a
+    /// view that is rebuilt underneath the engine) resumes with every step
+    /// already taken instead of starting from zero.
+    public func start(_ mode: Mode, since: Date = Date()) {
         stop()
         self.mode = mode
         count = 0
         hasCompleted = false
+        isMoving = false
         repPhase = .idle
         filteredVertical = 0
 
         switch mode {
         case .steps(let target):
             goal = target
-            startSteps()
+            startSteps(from: since)
         case .shake(let target):
             goal = target
             startShake()
@@ -97,6 +115,8 @@ public final class MotionMissionEngine: ObservableObject {
     }
 
     public func stop() {
+        stepQueryTimer?.invalidate()
+        stepQueryTimer = nil
         #if canImport(CoreMotion)
         motionManager.stopAccelerometerUpdates()
         motionManager.stopDeviceMotionUpdates()
@@ -125,7 +145,19 @@ public final class MotionMissionEngine: ObservableObject {
 
     // MARK: - Steps
 
-    private func startSteps() {
+    /// Walking is counted from three sources at once, because the pedometer
+    /// alone feels broken on a live counter:
+    ///
+    /// * `startUpdates(from:)` delivers cumulative totals in batches every
+    ///   few seconds, with the first batch often slower still.
+    /// * `queryPedometerData(from:to:)` is polled every second and frequently
+    ///   knows about steps the live stream has not reported yet.
+    /// * The accelerometer says whether the phone is moving at all, so the
+    ///   screen reacts within a frame of the user getting up.
+    ///
+    /// `StepCountModel` reconciles the totals into a count that never goes
+    /// backwards.
+    private func startSteps(from start: Date) {
         #if canImport(CoreMotion)
         guard CMPedometer.isStepCountingAvailable() else {
             availability = .unsupported("This device cannot count steps.")
@@ -135,43 +167,120 @@ public final class MotionMissionEngine: ObservableObject {
 
         let status = CMPedometer.authorizationStatus()
         if status == .denied || status == .restricted {
-            availability = .permissionDenied("Motion access is off. Enable it in Settings › Privacy › Motion & Fitness.")
+            availability = .permissionDenied(Self.motionDeniedMessage)
             return
         }
+        awaitingMotionPermission = status == .notDetermined
 
         availability = .ready
         isRunning = true
-        hint = "Get up and start walking"
+        stepModel = StepCountModel(goal: goal)
+        stepStart = start
+        hint = stepModel.hint
 
-        let start = Date()
         pedometer.startUpdates(from: start) { [weak self] data, error in
-            guard let data else {
-                if let error { self?.log.error("Pedometer: \(String(describing: error), privacy: .public)") }
-                return
-            }
-            let steps = data.numberOfSteps.intValue
             Task { @MainActor in
-                guard let self, !self.hasCompleted else { return }
-                // The pedometer reports cumulative totals, so assign rather
-                // than increment.
-                let clamped = min(steps, self.goal)
-                if clamped != self.count {
-                    self.count = clamped
-                    self.onIncrement?(clamped)
+                guard let self else { return }
+                if let error {
+                    self.handlePedometerError(error)
+                    return
                 }
-                let left = max(0, self.goal - clamped)
-                self.hint = left == 0 ? "Done" : "\(left) steps to go"
-                if clamped >= self.goal {
-                    self.hasCompleted = true
-                    self.onComplete?()
-                    self.stop()
-                }
+                guard let data else { return }
+                self.applySteps(total: data.numberOfSteps.intValue, from: .liveUpdate)
             }
         }
+
+        // The query every second is what makes the counter feel live.
+        let timer = Timer(timeInterval: StepCountModel.queryInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollPedometer() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        stepQueryTimer = timer
+
+        startMovementDetection()
         #else
         availability = .unsupported("Motion sensors are not available.")
         #endif
     }
+
+    #if canImport(CoreMotion)
+    private static let motionDeniedMessage =
+        "Motion access is off. Enable it in Settings › Privacy & Security › Motion & Fitness, then come back."
+
+    private func pollPedometer() {
+        guard isRunning, !hasCompleted, let mode, case .steps = mode else { return }
+
+        // A permission prompt that appeared mid-mission may have just been
+        // answered; a denial must surface instead of a counter stuck at 0.
+        if awaitingMotionPermission {
+            let status = CMPedometer.authorizationStatus()
+            if status == .denied || status == .restricted {
+                handlePedometerError(NSError(domain: CMErrorDomain, code: Int(CMErrorMotionActivityNotAuthorized.rawValue)))
+                return
+            }
+            if status == .authorized { awaitingMotionPermission = false }
+        }
+
+        pedometer.queryPedometerData(from: stepStart, to: Date()) { [weak self] data, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.handlePedometerError(error)
+                    return
+                }
+                guard let data else { return }
+                self.applySteps(total: data.numberOfSteps.intValue, from: .query)
+            }
+        }
+    }
+
+    private func applySteps(total: Int, from source: StepCountModel.Source) {
+        guard !hasCompleted else { return }
+        let change = stepModel.ingest(total: total, from: source)
+        if change.countChanged {
+            count = stepModel.count
+            onIncrement?(count)
+        }
+        hint = stepModel.hint
+        if change.justCompleted {
+            hasCompleted = true
+            onComplete?()
+            // Called from inside a pedometer callback's main-actor hop, which
+            // is safe: the callback has already returned.
+            stop()
+        }
+    }
+
+    private func handlePedometerError(_ error: Error) {
+        let nsError = error as NSError
+        log.error("Pedometer: \(String(describing: error), privacy: .public)")
+        let notAuthorised = nsError.domain == CMErrorDomain
+            && nsError.code == Int(CMErrorMotionActivityNotAuthorized.rawValue)
+        if notAuthorised || CMPedometer.authorizationStatus() == .denied {
+            availability = .permissionDenied(Self.motionDeniedMessage)
+            stop()
+        }
+    }
+
+    /// Accelerometer-only movement detection: no permission prompt, no
+    /// latency, so the screen reacts the moment the user gets up.
+    private func startMovementDetection() {
+        guard motionManager.isAccelerometerAvailable else { return }
+        motionManager.accelerometerUpdateInterval = 1.0 / 20.0
+        motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data else { return }
+            MainActor.assumeIsolated {
+                let a = data.acceleration
+                let magnitude = sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
+                self.stepModel.ingestAcceleration(magnitude: magnitude, at: Date())
+                if self.stepModel.isMoving != self.isMoving {
+                    self.isMoving = self.stepModel.isMoving
+                    self.hint = self.stepModel.hint
+                }
+            }
+        }
+    }
+    #endif
 
     // MARK: - Shake
 

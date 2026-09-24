@@ -138,7 +138,9 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Default, minimum, maximum and step for the goal stepper.
     public var goalRange: (initial: Int, min: Int, max: Int, step: Int) {
         switch self {
-        case .walk: return (500, 10, 5_000, 10)
+        // Minimum 30: the pedometer reports in batches of roughly 5–10
+        // steps, so a goal below that reads as a stuck counter.
+        case .walk: return (500, 30, 5_000, 10)
         case .shake: return (30, 5, 300, 5)
         case .pushup: return (10, 1, 100, 1)
         case .squat: return (10, 1, 100, 1)
