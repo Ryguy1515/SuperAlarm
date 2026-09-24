@@ -84,6 +84,21 @@ public final class JSONFileStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.superalarm.filestore", qos: .utility)
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let rootOverride: URL?
+    private let problemsLock = NSLock()
+    private var problems: Set<String> = []
+
+    /// Files that exist but could not be read or decoded in this process.
+    /// A store that sees its own file here must not write an empty
+    /// replacement over it — that would turn a transient read error into
+    /// permanent loss of every alarm.
+    public var unreadableFiles: Set<String> {
+        problemsLock.lock()
+        defer { problemsLock.unlock() }
+        return problems
+    }
+
+    private var root: URL { rootOverride ?? StorageLocation.rootURL }
 
     /// ISO8601 with milliseconds. The stock `.iso8601` strategy truncates to
     /// whole seconds, so a date would not survive a write/read round trip —
@@ -102,7 +117,10 @@ public final class JSONFileStore: @unchecked Sendable {
         return formatter
     }()
 
-    public init() {
+    /// - Parameter rootURL: directory to read and write in; defaults to the
+    ///   app's storage location. Injectable for tests.
+    public init(rootURL: URL? = nil) {
+        rootOverride = rootURL
         encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .custom { date, encoder in
@@ -124,8 +142,22 @@ public final class JSONFileStore: @unchecked Sendable {
     }
 
     public func load<T: Decodable>(_ type: T.Type, from fileName: String) -> T? {
-        let url = StorageLocation.rootURL.appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        let url = root.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            // Present but unreadable (file protection before first unlock,
+            // a transient I/O error): remember it so nothing overwrites it.
+            StorageLocation.log.error(
+                "Failed to read \(fileName, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            noteProblem(fileName)
+            return nil
+        }
+
         do {
             return try decoder.decode(type, from: data)
         } catch {
@@ -137,12 +169,24 @@ public final class JSONFileStore: @unchecked Sendable {
             let backup = url.appendingPathExtension("corrupt")
             try? FileManager.default.removeItem(at: backup)
             try? FileManager.default.moveItem(at: url, to: backup)
+            noteProblem(fileName)
             return nil
         }
     }
 
+    /// True when a `.corrupt` copy of the file is sitting beside it.
+    public func hasCorruptBackup(for fileName: String) -> Bool {
+        FileManager.default.fileExists(atPath: root.appendingPathComponent(fileName + ".corrupt").path)
+    }
+
+    private func noteProblem(_ fileName: String) {
+        problemsLock.lock()
+        problems.insert(fileName)
+        problemsLock.unlock()
+    }
+
     public func save<T: Encodable>(_ value: T, to fileName: String) {
-        let url = StorageLocation.rootURL.appendingPathComponent(fileName)
+        let url = root.appendingPathComponent(fileName)
         guard let data = try? encoder.encode(value) else {
             StorageLocation.log.error("Failed to encode \(fileName, privacy: .public)")
             return
@@ -160,13 +204,13 @@ public final class JSONFileStore: @unchecked Sendable {
 
     /// Synchronous variant for use when the process is about to be suspended.
     public func saveNow<T: Encodable>(_ value: T, to fileName: String) {
-        let url = StorageLocation.rootURL.appendingPathComponent(fileName)
+        let url = root.appendingPathComponent(fileName)
         guard let data = try? encoder.encode(value) else { return }
         try? data.write(to: url, options: [.atomic])
     }
 
     public func delete(_ fileName: String) {
-        let url = StorageLocation.rootURL.appendingPathComponent(fileName)
+        let url = root.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: url)
     }
 }

@@ -69,11 +69,26 @@ final class StatisticsTests: XCTestCase {
         XCTAssertEqual(stats.currentStreak, 2, "A streak should survive until a whole day is missed")
     }
 
-    func testAMissedDayBreaksTheStreak() {
+    func testADayWithNoAlarmDoesNotBreakTheStreak() {
+        // Weekday-only alarms: the weekend has no records at all.
         let records = [
             record(on: day(2026, 8, 1)),
             record(on: day(2026, 8, 2)),
-            // 3 August missing entirely.
+            // 3 August: no alarm was set.
+            record(on: day(2026, 8, 4)),
+            record(on: day(2026, 8, 5)),
+        ]
+        let stats = WakeStatistics(records: records, now: day(2026, 8, 5, hour: 12), calendar: calendar)
+
+        XCTAssertEqual(stats.currentStreak, 4)
+        XCTAssertEqual(stats.longestStreak, 4)
+    }
+
+    func testAMissedAlarmBreaksTheStreak() {
+        let records = [
+            record(on: day(2026, 8, 1)),
+            record(on: day(2026, 8, 2)),
+            record(on: day(2026, 8, 3), outcome: .rangOut),
             record(on: day(2026, 8, 4)),
             record(on: day(2026, 8, 5)),
         ]
@@ -81,6 +96,19 @@ final class StatisticsTests: XCTestCase {
 
         XCTAssertEqual(stats.currentStreak, 2)
         XCTAssertEqual(stats.longestStreak, 2)
+    }
+
+    func testSkippedOccurrencesCountTowardsNothing() {
+        let records = [
+            record(on: day(2026, 8, 4)),
+            record(on: day(2026, 8, 5), outcome: .skipped),
+            record(on: day(2026, 8, 6)),
+        ]
+        let stats = WakeStatistics(records: records, now: day(2026, 8, 6, hour: 12), calendar: calendar)
+
+        XCTAssertEqual(stats.totalWakeUps, 2)
+        XCTAssertEqual(stats.successRate, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(stats.currentStreak, 2)
     }
 
     func testFailedOutcomesDoNotCountTowardStreaks() {
@@ -101,7 +129,8 @@ final class StatisticsTests: XCTestCase {
         var records: [WakeRecord] = []
         // A five-day run in July.
         for offset in 1...5 { records.append(record(on: day(2026, 7, offset))) }
-        // A two-day run in August.
+        // A miss, then a two-day run in August.
+        records.append(record(on: day(2026, 8, 4), outcome: .missed))
         records.append(record(on: day(2026, 8, 5)))
         records.append(record(on: day(2026, 8, 6)))
 
@@ -358,6 +387,70 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(restored.currentStreak, 9)
         XCTAssertEqual(restored.upcoming.count, 1)
         XCTAssertEqual(restored.upcoming.first?.label, "Wake")
+    }
+
+    // MARK: File store
+
+    private func temporaryStoreDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SuperAlarmTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    func testFileStoreReadsWholeSecondDatesWrittenByTheFirstBuild() throws {
+        let root = try temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let json = #"[{"hour": 6, "minute": 30, "createdAt": "2026-08-06T07:00:00Z"}]"#
+        try Data(json.utf8).write(to: root.appendingPathComponent("alarms.json"))
+
+        let store = JSONFileStore(rootURL: root)
+        let alarms = store.load([Alarm].self, from: "alarms.json")
+
+        XCTAssertEqual(alarms?.count, 1)
+        XCTAssertEqual(alarms?.first?.createdAt, Date(timeIntervalSince1970: 1_785_999_600))
+        XCTAssertTrue(store.unreadableFiles.isEmpty)
+    }
+
+    func testFileStoreMovesAMalformedFileAsideAndRemembersIt() throws {
+        let root = try temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("{not json".utf8).write(to: root.appendingPathComponent("alarms.json"))
+
+        let store = JSONFileStore(rootURL: root)
+        XCTAssertNil(store.load([Alarm].self, from: "alarms.json"))
+        XCTAssertTrue(store.hasCorruptBackup(for: "alarms.json"))
+        XCTAssertTrue(store.unreadableFiles.contains("alarms.json"))
+    }
+
+    func testFileStoreDistinguishesAbsentFromUnreadable() throws {
+        let root = try temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JSONFileStore(rootURL: root)
+
+        XCTAssertNil(store.load([Alarm].self, from: "alarms.json"))
+        XCTAssertTrue(store.unreadableFiles.isEmpty, "A missing file is a fresh install, not a problem")
+
+        // A directory where the file should be cannot be read as data.
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("history.json"), withIntermediateDirectories: true
+        )
+        XCTAssertNil(store.load([WakeRecord].self, from: "history.json"))
+        XCTAssertTrue(store.unreadableFiles.contains("history.json"))
+    }
+
+    func testFileStoreRoundTripsThroughSaveNow() throws {
+        let root = try temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = JSONFileStore(rootURL: root)
+
+        var alarm = Alarm(hour: 7, minute: 15)
+        alarm.label = "Round trip"
+        alarm.createdAt = Date(timeIntervalSince1970: 1_770_000_000.5)
+        store.saveNow([alarm], to: "alarms.json")
+
+        let restored = store.load([Alarm].self, from: "alarms.json")
+        XCTAssertEqual(restored, [alarm])
     }
 
     // MARK: Store behaviour

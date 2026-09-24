@@ -147,7 +147,11 @@ public struct WakeStatistics: Sendable {
 
     /// Builds the full statistics set. `now` is injected so this is testable.
     public init(records: [WakeRecord], now: Date = Date(), calendar: Calendar = .current) {
-        let sorted = records.sorted { $0.scheduledFor < $1.scheduledFor }
+        // A skipped occurrence was the user's choice, not a wake-up that
+        // went either way; it counts towards nothing.
+        let sorted = records
+            .filter { $0.outcome != .skipped }
+            .sorted { $0.scheduledFor < $1.scheduledFor }
         totalWakeUps = sorted.count
         successCount = sorted.filter { $0.outcome.isSuccess }.count
         totalSnoozes = sorted.reduce(0) { $0 + $1.snoozeCount }
@@ -181,30 +185,26 @@ public struct WakeStatistics: Sendable {
             if record.outcome.isSuccess { successDays.insert(day) }
         }
 
-        // Longest run of consecutive successful days anywhere in the history.
-        let orderedDays = successDays.sorted()
+        // Streaks count alarm days, not calendar days: a day with no alarm
+        // (a weekend for a weekday alarm) neither extends nor breaks the
+        // streak. A day whose alarm was missed or rang out breaks it.
+        let alarmDays = dayRecords.keys.sorted()
         var run = 0
-        var previous: Date?
-        for day in orderedDays {
-            if let previous, let next = calendar.date(byAdding: .day, value: 1, to: previous), next == day {
-                run += 1
-            } else {
-                run = 1
-            }
+        for day in alarmDays {
+            run = successDays.contains(day) ? run + 1 : 0
             longestStreak = max(longestStreak, run)
-            previous = day
         }
 
-        // Current streak walks backwards from today. Today not yet being done
-        // does not break the streak — yesterday's absence does.
+        // Current streak walks backwards over alarm days from the most recent
+        // one. Today not yet being done does not break the streak.
         let today = calendar.startOfDay(for: now)
-        var cursor = successDays.contains(today)
-            ? today
-            : (calendar.date(byAdding: .day, value: -1, to: today) ?? today)
-        while successDays.contains(cursor) {
+        for day in alarmDays.reversed() {
+            if day == today, !successDays.contains(day) {
+                // Still in progress: ignore, look at the previous alarm day.
+                continue
+            }
+            guard successDays.contains(day) else { break }
             currentStreak += 1
-            guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
-            cursor = previousDay
         }
 
         // Trailing 30-day window for the chart.

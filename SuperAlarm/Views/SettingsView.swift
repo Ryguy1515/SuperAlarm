@@ -458,6 +458,7 @@ struct DiagnosticsView: View {
             ("If the app is killed", coordinator.reSummonDescription),
             ("System alarms", coordinator.backendDiagnostics),
             ("Saved ring state", runtime.hasPersistedRingState ? "Present — will resume on launch" : "None"),
+            ("Data files", store.dataProblems.isEmpty ? "All readable" : "Problem: \(store.dataProblems.joined(separator: ", "))"),
         ]
     }
 

@@ -29,6 +29,18 @@ public final class AlarmStore: ObservableObject {
         settings = files.load(AppSettings.self, from: StorageLocation.settingsFile) ?? AppSettings()
         history = files.load([WakeRecord].self, from: StorageLocation.historyFile) ?? []
         recomputeStatistics()
+        MissionAssetStore.shared.removeUnreferenced(keeping: Set(alarms.compactMap(\.mission.objectImageID)))
+    }
+
+    /// Files that could not be read at launch. Shown in Diagnostics, and a
+    /// guard against writing an empty list over data that is still there.
+    public var dataProblems: [String] {
+        var problems = Array(files.unreadableFiles).sorted()
+        for name in [StorageLocation.alarmsFile, StorageLocation.settingsFile, StorageLocation.historyFile]
+        where files.hasCorruptBackup(for: name) && !problems.contains(name) {
+            problems.append(name)
+        }
+        return problems
     }
 
     // MARK: Derived
@@ -87,6 +99,11 @@ public final class AlarmStore: ObservableObject {
             alarms.append(alarm)
             commit()
             return
+        }
+        // A re-registered object photo replaces the old file, not just the
+        // reference to it.
+        if let previous = alarms[index].mission.objectImageID, previous != alarm.mission.objectImageID {
+            MissionAssetStore.shared.deleteImage(id: previous)
         }
         alarms[index] = alarm
         commit()
@@ -167,6 +184,12 @@ public final class AlarmStore: ObservableObject {
         // A little over a year of history is plenty and keeps the file small.
         let cutoff = Calendar.current.date(byAdding: .day, value: -400, to: Date()) ?? .distantPast
         history.removeAll { $0.scheduledFor < cutoff }
+        guard !files.unreadableFiles.contains(StorageLocation.historyFile) else {
+            // The file on disk could not be read; appending one record to an
+            // empty in-memory list and saving would erase the rest.
+            recomputeStatistics()
+            return
+        }
         files.save(history, to: StorageLocation.historyFile)
         recomputeStatistics()
         writeWidgetSnapshot()
@@ -198,9 +221,18 @@ public final class AlarmStore: ObservableObject {
 
     /// Saves, refreshes the widget payload, and asks the scheduler to rebuild.
     public func commit() {
-        files.save(alarms, to: StorageLocation.alarmsFile)
+        if canWriteAlarms {
+            files.save(alarms, to: StorageLocation.alarmsFile)
+        }
         writeWidgetSnapshot()
         onScheduleInvalidated?()
+    }
+
+    /// False when the alarms file exists but could not be read this launch
+    /// and there is nothing in memory to replace it with. Writing an empty
+    /// list then would destroy alarms that are probably still intact.
+    private var canWriteAlarms: Bool {
+        !(alarms.isEmpty && files.unreadableFiles.contains(StorageLocation.alarmsFile))
     }
 
     private func persistSettings() {
@@ -209,9 +241,13 @@ public final class AlarmStore: ObservableObject {
 
     /// Flush everything synchronously — called when the app is backgrounding.
     public func flush() {
-        files.saveNow(alarms, to: StorageLocation.alarmsFile)
+        if canWriteAlarms {
+            files.saveNow(alarms, to: StorageLocation.alarmsFile)
+        }
         files.saveNow(settings, to: StorageLocation.settingsFile)
-        files.saveNow(history, to: StorageLocation.historyFile)
+        if !(history.isEmpty && files.unreadableFiles.contains(StorageLocation.historyFile)) {
+            files.saveNow(history, to: StorageLocation.historyFile)
+        }
     }
 
     private func writeWidgetSnapshot() {
@@ -275,5 +311,18 @@ public final class MissionAssetStore: @unchecked Sendable {
 
     public func deleteImage(id: String) {
         try? FileManager.default.removeItem(at: url(for: id))
+    }
+
+    /// Removes photos no alarm references any more — re-registrations and
+    /// cancelled edits leave them behind, and each is a full camera JPEG.
+    public func removeUnreferenced(keeping referenced: Set<String>) {
+        let directory = StorageLocation.missionAssetsURL
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for file in files where file.hasSuffix(".jpg") {
+            let id = String(file.dropLast(4))
+            if !referenced.contains(id) {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(file))
+            }
+        }
     }
 }
