@@ -81,7 +81,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .math:
             return "Solve a set of arithmetic problems. Harder difficulties use larger numbers and more operations, which forces genuine mental effort rather than muscle memory."
         case .pushup:
-            return "Hold the phone against your chest or place it on the floor beneath you. Motion sensors count each rep — half-reps do not register."
+            return "Hold the phone to your chest, or put it in a chest pocket or armband — anywhere it rises and falls with your torso. Motion sensors count the movement of the phone itself, so it has to travel with you. Half-reps do not register."
         case .walk:
             return "The step counter runs until you hit your goal. Leaving the bed is the entire point, so pick a number that gets you out of the room."
         case .faceID:
