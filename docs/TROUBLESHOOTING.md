@@ -26,7 +26,11 @@ Comment out the *Run unit tests* step. Do read what failed first — the tests c
 ## Sideloading
 
 **Sideloadly can't see the iPhone.**
-Almost always the wrong iTunes. Uninstall the **Microsoft Store** versions of iTunes and iCloud, then install both from `apple.com` directly. Reboot, reconnect, and tap **Trust** on the phone.
+Almost always the wrong iTunes. Uninstall the **Microsoft Store** version, install iTunes from `apple.com` directly, and reboot. Then reconnect and tap **Trust** on the phone.
+
+To confirm the drivers landed, open Device Manager with the phone plugged in and unlocked: **Apple Mobile Device USB Device** should be listed. If it is not, the Store build is probably still installed.
+
+iCloud for Windows is **not** required — that is an AltStore prerequisite. Apple now ships iCloud through the Microsoft Store only, so there is no direct download to hunt for.
 
 **"Provisioning profile doesn't include the … entitlement".**
 This project deliberately ships no entitlements file, so if you see this you've added one. Remove it. Free personal teams cannot use App Groups, push, iCloud or in-app purchase, and requesting any of them fails signing outright.

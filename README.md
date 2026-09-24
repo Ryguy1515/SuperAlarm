@@ -69,7 +69,7 @@ Unzip the artifact to get the `.ipa` files.
 
 ### 3. Prepare Windows
 
-1. Install **iTunes** and **iCloud for Windows** from `apple.com` directly — **not** the Microsoft Store versions. The Store builds lack the drivers Sideloadly needs. Uninstall them first if present.
+1. Install **iTunes** from `apple.com` directly — **not** the Microsoft Store version, which lacks the Apple Mobile Device drivers Sideloadly needs. Uninstall the Store version first if present, then reboot. You never need to open or sign in to iTunes. (iCloud is *not* required — that is an AltStore prerequisite, not a Sideloadly one.)
 2. Install **Sideloadly** from <https://sideloadly.io>.
 
 ### 4. Sign and install
