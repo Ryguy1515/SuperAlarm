@@ -167,24 +167,38 @@ final class PoseRepCounterTests: XCTestCase {
     }
 
     func testSquatUsesItsOwnThresholds() {
-        // 105 degrees is deep enough for a push-up but not for a squat.
+        // Squats are counted deeper and straighter than push-ups.
         XCTAssertLessThan(RepExercise.pushup.downBelow, RepExercise.squat.downBelow)
         XCTAssertLessThan(RepExercise.pushup.upAbove, RepExercise.squat.upAbove)
 
-        let machine = RepCountingStateMachine(exercise: .squat)
-        let sample = { (degrees: Double) -> PoseSample in
-            let radians = degrees * .pi / 180
-            return PoseSample(joints: [
-                .knee: .zero,
-                .hip: CGPoint(x: 1, y: 0),
-                .ankle: CGPoint(x: cos(radians), y: sin(radians)),
-            ])
-        }
+        // 105 degrees sits between the two down thresholds, so the same bend
+        // counts as a squat but is too shallow for a push-up.
+        let squat = RepCountingStateMachine(exercise: .squat)
         let start = Date()
-        _ = machine.ingest(sample(170), now: start)
-        _ = machine.ingest(sample(105), now: start.addingTimeInterval(0.4))
-        let counted = machine.ingest(sample(170), now: start.addingTimeInterval(0.8))
-        XCTAssertFalse(counted, "105 degrees is not deep enough to count as a squat")
+        _ = squat.ingest(kneeSample(degrees: 170), now: start)
+        _ = squat.ingest(kneeSample(degrees: 105), now: start.addingTimeInterval(0.4))
+        XCTAssertTrue(
+            squat.ingest(kneeSample(degrees: 170), now: start.addingTimeInterval(0.8)),
+            "105 degrees is past the 110 degree squat threshold, so it should count"
+        )
+
+        let pushup = RepCountingStateMachine(exercise: .pushup)
+        _ = pushup.ingest(elbowSample(degrees: 170), now: start)
+        _ = pushup.ingest(elbowSample(degrees: 105), now: start.addingTimeInterval(0.4))
+        XCTAssertFalse(
+            pushup.ingest(elbowSample(degrees: 170), now: start.addingTimeInterval(0.8)),
+            "105 degrees never reaches the 100 degree push-up threshold"
+        )
+    }
+
+    /// Builds a sample whose knee angle is approximately `degrees`.
+    private func kneeSample(degrees: Double) -> PoseSample {
+        let radians = degrees * .pi / 180
+        return PoseSample(joints: [
+            .knee: .zero,
+            .hip: CGPoint(x: 1, y: 0),
+            .ankle: CGPoint(x: cos(radians), y: sin(radians)),
+        ])
     }
 
     // MARK: Settings
