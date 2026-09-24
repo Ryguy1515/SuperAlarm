@@ -28,6 +28,10 @@ public final class SystemVolume {
     private var volumeView: MPVolumeView?
     private weak var slider: UISlider?
     private var retriesLeft = 0
+    /// True while a lookup chain is scheduled, so repeated `prepare()` calls
+    /// (one per volume write) do not each start a chain and burn the retry
+    /// budget between them.
+    private var isLookingUp = false
     #endif
 
     /// Number of successful writes since launch, for diagnostics.
@@ -96,6 +100,8 @@ public final class SystemVolume {
             retriesLeft = 6
         }
 
+        guard !isLookingUp else { return }
+        isLookingUp = true
         scheduleSliderLookup(after: 0.1)
         #endif
     }
@@ -109,10 +115,12 @@ public final class SystemVolume {
             Task { @MainActor in
                 guard let self else { return }
                 if self.findSlider() != nil {
+                    self.isLookingUp = false
                     self.log.info("Volume control ready")
                     return
                 }
                 guard self.retriesLeft > 0 else {
+                    self.isLookingUp = false
                     self.log.error("Volume control: MPVolumeView never vended its slider; volume lock unavailable")
                     return
                 }

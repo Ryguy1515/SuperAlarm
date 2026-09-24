@@ -61,6 +61,17 @@ public final class AlarmAudioEngine: ObservableObject {
     @Published public private(set) var isVolumeLocked = false
     /// Target app-level gain once any ramp completes.
     private var targetGain: Float = 1.0
+    /// Multiplier applied while a spoken briefing or Face ID scan needs the
+    /// alarm quieter. Kept separately from the ramp so the two do not fight.
+    private var duckFactor: Float = 1.0
+    /// Last time the lock wrote the hardware volume, for rate limiting.
+    private var lastLockWriteAt: Date = .distantPast
+    /// Keeps the process alive briefly after a call interrupts a ring, so
+    /// playback can be resumed the moment the session is ours again.
+    private var interruptionRetryTimer: Timer?
+    #if canImport(UIKit)
+    private var interruptionTask: UIBackgroundTaskIdentifier = .invalid
+    #endif
     /// Progress through the gradual-volume ramp.
     private var rampStep = 0
     private var observersInstalled = false
@@ -97,7 +108,7 @@ public final class AlarmAudioEngine: ObservableObject {
     }
 
     private func deactivateSession() {
-        guard keepAlivePlayer == nil, previewPlayer == nil else { return }
+        guard keepAlivePlayer == nil, previewPlayer == nil, alarmPlayer == nil, !isRinging else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
@@ -108,14 +119,29 @@ public final class AlarmAudioEngine: ObservableObject {
     public func startAlarm(tone: AlarmTone, settings: SoundSettings, lockVolume shouldLock: Bool) {
         stopPreview()
         stopKeepAlive()
+        duckFactor = 1.0
 
-        guard let url = SoundBundle.url(forFileNamed: tone.fileName) else {
-            log.error("Missing tone file \(tone.fileName, privacy: .public)")
-            // Even with no audio the alarm must still be dismissible, so carry
-            // on with vibration only rather than bailing out.
+        // "Enable sound" off means vibration only — and no pushing the
+        // hardware volume up for a sound that is not going to play.
+        guard settings.isEnabled else {
+            beginVibration(settings)
+            isRinging = true
+            log.info("Alarm started silent by request; vibrating")
+            return
+        }
+
+        // A tone whose file has gone (a custom tone lost to a partial backup
+        // restore, say) falls back to the default bundled tone. Only if that
+        // is missing too does the alarm carry on with vibration alone.
+        let fallback = SoundBundle.url(forFileNamed: SoundCatalog.tone(id: SoundCatalog.defaultToneID).fileName)
+        guard let url = SoundBundle.url(forFileNamed: tone.fileName) ?? fallback else {
+            log.error("Missing tone file \(tone.fileName, privacy: .public) and the default tone")
             beginVibration(settings)
             isRinging = true
             return
+        }
+        if SoundBundle.url(forFileNamed: tone.fileName) == nil {
+            log.error("Tone \(tone.fileName, privacy: .public) missing; playing the default tone instead")
         }
 
         activateAlarmSession()
@@ -177,28 +203,12 @@ public final class AlarmAudioEngine: ObservableObject {
         log.info("Alarm started with tone \(tone.id, privacy: .public)")
     }
 
-    /// Plays a quieter version of the alarm — used by the pre-alarm heads-up.
-    public func startPreAlarm(tone: AlarmTone, volumeScale: Double) {
-        stopPreview()
-        guard let url = SoundBundle.url(forFileNamed: tone.fileName) else { return }
-        activateAlarmSession()
-        do {
-            let player = try AVAudioPlayer(contentsOf: url)
-            player.numberOfLoops = 0
-            player.volume = Float(max(0.02, min(1, volumeScale)))
-            player.prepareToPlay()
-            player.play()
-            alarmPlayer = player
-            isRinging = true
-        } catch {
-            log.error("Pre-alarm playback failed: \(String(describing: error), privacy: .public)")
-        }
-    }
-
     public func stopAlarm() {
         rampTimer?.invalidate()
         rampTimer = nil
         stopVolumeLock()
+        endInterruptionRecovery()
+        duckFactor = 1.0
 
         alarmPlayer?.stop()
         alarmPlayer = nil
@@ -216,29 +226,15 @@ public final class AlarmAudioEngine: ObservableObject {
         log.info("Alarm stopped")
     }
 
-    /// Briefly mutes without tearing anything down — used while a mission
-    /// needs the microphone or camera, or during a voice briefing.
-    public func setMuted(_ muted: Bool) {
-        alarmPlayer?.volume = muted ? 0 : targetGain
-    }
-
     /// Holds the alarm at a low level until released. Used while a spoken
-    /// briefing plays over the top.
+    /// briefing plays over the top or a Face ID scan needs attention. The
+    /// factor is applied on top of whatever the ramp is doing, so releasing
+    /// the duck mid-ramp lands back on the ramp rather than jumping to full.
     public func setDucked(_ ducked: Bool) {
+        duckFactor = ducked ? 0.12 : 1.0
         guard let player = alarmPlayer else { return }
-        player.setVolume(ducked ? targetGain * 0.12 : targetGain, fadeDuration: 0.3)
-    }
-
-    /// Momentarily drops the alarm to a low level, then restores it. Used so a
-    /// spoken briefing can be heard over the top.
-    public func duck(for duration: TimeInterval) {
-        guard let player = alarmPlayer else { return }
-        player.setVolume(targetGain * 0.15, fadeDuration: 0.3)
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            Task { @MainActor in
-                guard let self, let player = self.alarmPlayer else { return }
-                player.setVolume(self.targetGain, fadeDuration: 0.4)
-            }
+        if rampTimer == nil {
+            player.setVolume(targetGain * duckFactor, fadeDuration: 0.3)
         }
     }
 
@@ -273,13 +269,13 @@ public final class AlarmAudioEngine: ObservableObject {
                 // Ease in so the first few seconds are genuinely gentle.
                 let progress = Float(self.rampStep) / Float(steps)
                 let eased = progress * progress
-                player.volume = min(target, 0.05 + (target - 0.05) * eased)
+                player.volume = min(target, 0.05 + (target - 0.05) * eased) * self.duckFactor
                 // The hardware target follows, capped at 30 s so a long
                 // player ramp does not leave the phone quiet for minutes.
                 let hardwareProgress = min(1, Double(self.rampStep) * tick / min(duration, 30))
                 self.advanceLockTarget(progress: hardwareProgress * hardwareProgress)
                 if self.rampStep >= steps {
-                    player.volume = target
+                    player.volume = target * self.duckFactor
                     self.advanceLockTarget(progress: 1)
                     timer.invalidate()
                     self.rampTimer = nil
@@ -294,7 +290,10 @@ public final class AlarmAudioEngine: ObservableObject {
     private func advanceLockTarget(progress: Double) {
         guard lockEndTarget > lockPolicy.target else { return }
         let ramped = VolumeLockPolicy.rampedTarget(start: lockStartLevel, end: lockEndTarget, progress: progress)
-        let next = max(lockPolicy.target, ramped)
+        // Snapped to the hardware's sixteenth steps, so the target is always
+        // a level the route can actually report and the lock never chases a
+        // value it can never observe.
+        let next = VolumeLockPolicy.snappedToHardwareStep(max(lockPolicy.target, ramped))
         guard next > lockPolicy.target + 0.005 else { return }
         lockPolicy.target = next
         SystemVolume.shared.set(next)
@@ -318,9 +317,12 @@ public final class AlarmAudioEngine: ObservableObject {
         }
 
         let timer = Timer(timeInterval: VolumeLockPolicy.safetyNetInterval, repeats: true) { [weak self] _ in
+            // The session's own reading, not the slider's: the slider reports
+            // whatever was last written to it, which is exactly what the
+            // safety net must not trust.
+            let observed = AVAudioSession.sharedInstance().outputVolume
             Task { @MainActor in
-                guard let self else { return }
-                self.enforceVolumeLock(observed: SystemVolume.shared.current, reason: "timer")
+                self?.enforceVolumeLock(observed: observed, reason: "timer")
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -330,9 +332,20 @@ public final class AlarmAudioEngine: ObservableObject {
     private func enforceVolumeLock(observed: Float, reason: String) {
         guard lockVolume, isRinging else { return }
         guard lockPolicy.shouldRestore(observed: observed) else { return }
-        volumeRestoreCount += 1
+        // One write per short interval: a route that quantises coarsely can
+        // report a level just under the target after every write, and
+        // without this the observer and the write would chase each other
+        // every frame.
+        let now = Date()
+        guard now.timeIntervalSince(lastLockWriteAt) >= VolumeLockPolicy.minimumWriteInterval else { return }
+        lastLockWriteAt = now
+
         let restored = SystemVolume.shared.set(lockPolicy.target)
         let target = lockPolicy.target
+        if restored {
+            volumeRestoreCount += 1
+            HapticEngine.shared.warning()
+        }
         log.info("Volume lock (\(reason, privacy: .public)): \(observed, privacy: .public) back to \(target, privacy: .public); slider \(restored ? "ok" : "missing", privacy: .public)")
     }
 
@@ -467,7 +480,11 @@ public final class AlarmAudioEngine: ObservableObject {
         switch type {
         case .began:
             log.info("Audio interrupted")
+            if isRinging {
+                beginInterruptionRecovery()
+            }
         case .ended:
+            endInterruptionRecovery()
             if isRinging {
                 activateAlarmSession()
                 alarmPlayer?.play()
@@ -478,6 +495,51 @@ public final class AlarmAudioEngine: ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    /// A phone call pauses the player and, once the app is in the
+    /// background with no audio running, iOS suspends the process — and the
+    /// `.ended` notification arrives only when it next runs. A short
+    /// background task plus a retry keeps the app alive long enough to grab
+    /// the session back the moment the call ends. Beyond that grace period
+    /// the follow-up chain brings the alarm back.
+    private func beginInterruptionRecovery() {
+        endInterruptionRecovery()
+        #if canImport(UIKit)
+        interruptionTask = UIApplication.shared.beginBackgroundTask(withName: "AlarmInterruption") { [weak self] in
+            Task { @MainActor in self?.endInterruptionRecovery() }
+        }
+        #endif
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isRinging, let player = self.alarmPlayer else {
+                    self?.endInterruptionRecovery()
+                    return
+                }
+                if player.isPlaying {
+                    self.endInterruptionRecovery()
+                    return
+                }
+                self.activateAlarmSession()
+                if player.play() {
+                    self.log.info("Alarm resumed after interruption")
+                    self.endInterruptionRecovery()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        interruptionRetryTimer = timer
+    }
+
+    private func endInterruptionRecovery() {
+        interruptionRetryTimer?.invalidate()
+        interruptionRetryTimer = nil
+        #if canImport(UIKit)
+        if interruptionTask != .invalid {
+            UIApplication.shared.endBackgroundTask(interruptionTask)
+            interruptionTask = .invalid
+        }
+        #endif
     }
 
     private func handleRouteChange(_ notification: Notification) {

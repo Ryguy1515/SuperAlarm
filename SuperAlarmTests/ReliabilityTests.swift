@@ -50,6 +50,15 @@ final class VolumeLockPolicyTests: XCTestCase {
         XCTAssertEqual(VolumeLockPolicy(target: 1.7).target, 1.0)
         XCTAssertEqual(VolumeLockPolicy(target: -0.2).target, 0.0)
     }
+
+    func testRampTargetsSnapUpToAHardwareStepSoTheyCanBeObserved() {
+        // A target between sixteenths can never be reported back by the
+        // route, and the lock would chase it forever.
+        XCTAssertEqual(VolumeLockPolicy.snappedToHardwareStep(0.73), 12.0 / 16.0, accuracy: 0.0001)
+        XCTAssertEqual(VolumeLockPolicy.snappedToHardwareStep(0.5), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(VolumeLockPolicy.snappedToHardwareStep(0.99), 1.0, accuracy: 0.0001)
+        XCTAssertLessThan(VolumeLockPolicy.minimumWriteInterval, VolumeLockPolicy.safetyNetInterval)
+    }
 }
 
 final class BackstopPolicyTests: XCTestCase {

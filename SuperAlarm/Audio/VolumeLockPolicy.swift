@@ -24,6 +24,16 @@ public struct VolumeLockPolicy: Equatable, Sendable {
     /// Interval of the safety-net timer that backs up the observer.
     public static let safetyNetInterval: TimeInterval = 1.0
 
+    /// Shortest gap between two hardware writes by the lock.
+    public static let minimumWriteInterval: TimeInterval = 0.1
+
+    /// iOS moves the hardware volume in sixteenths; a target between steps
+    /// can never be observed exactly, so ramp targets are rounded up to the
+    /// next step.
+    public static func snappedToHardwareStep(_ value: Float) -> Float {
+        min(1, (value * 16).rounded(.up) / 16)
+    }
+
     public init(target: Float, tolerance: Float = 0.02) {
         self.target = max(0, min(1, target))
         self.tolerance = tolerance

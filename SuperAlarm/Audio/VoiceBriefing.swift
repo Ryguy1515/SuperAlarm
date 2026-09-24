@@ -30,6 +30,10 @@ public final class VoiceBriefing: NSObject, ObservableObject {
 
         rate = alarm.voiceBriefing.speechRate
         pendingText = text
+        // A briefing restarted by a snooze or wake-up check replaces the
+        // previous repeat timer rather than stacking a second voice on top.
+        repeatTimer?.invalidate()
+        repeatTimer = nil
         speak(text)
 
         let interval = alarm.voiceBriefing.repeatIntervalSeconds
@@ -49,6 +53,12 @@ public final class VoiceBriefing: NSObject, ObservableObject {
     public func preview(for alarm: Alarm, settings: AppSettings) {
         let text = Self.briefingText(for: alarm, settings: settings, weather: WeatherService.shared.snapshot)
         rate = alarm.voiceBriefing.speechRate
+        // Outside a ring the session may still be the launch default, which
+        // is silenced by the ringer switch; the briefing should be heard the
+        // way the alarm will play it.
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.duckOthers])
+        try? session.setActive(true)
         speak(text)
     }
 
@@ -58,7 +68,9 @@ public final class VoiceBriefing: NSObject, ObservableObject {
         }
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.identifier)
+        // `Locale.identifier` uses an underscore ("en_US"), which the
+        // synthesiser rejects; it wants the BCP 47 form.
+        utterance.voice = AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode())
             ?? AVSpeechSynthesisVoice(language: "en-US")
         // AVSpeechUtterance rates are not linear; map 0...1 onto a usable band
         // around the default.
