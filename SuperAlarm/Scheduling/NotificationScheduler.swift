@@ -35,6 +35,8 @@ public enum AlarmNotification {
     static let prefixNet = "net"
     static let prefixSnooze = "snooze"
     static let prefixWakeCheck = "wake"
+    /// "Alarm still ringing" reminders armed when the user leaves the app.
+    static let prefixNag = "nag"
     static let bedtimeIdentifier = "bedtime"
 
     /// Prefixes owned by `rebuild` and therefore safe to clear on each pass.
@@ -78,12 +80,13 @@ public final class NotificationScheduler: @unchecked Sendable {
     private let center = UNUserNotificationCenter.current()
     private let log = Logger(subsystem: "io.superalarm", category: "notifications")
 
-    /// iOS drops anything past 64. Leave headroom for snoozes and wake checks.
-    private let budget = 56
+    /// iOS keeps the soonest 64 and drops the rest. Leave headroom for
+    /// snoozes, wake checks and the still-ringing nags.
+    private let budget = 44
     /// Seconds between links in a chain. Slightly longer than the 28 s tones.
     private let chainSpacing: TimeInterval = 30
     /// Never schedule a chain longer than this.
-    private let maxChainLength = 40
+    private let maxChainLength = 30
 
     private init() {}
 
@@ -162,10 +165,17 @@ public final class NotificationScheduler: @unchecked Sendable {
 
     /// Tears down and rebuilds every alarm-derived notification.
     ///
-    /// `chainsEnabled` is false when a system-level alarm backend is handling
-    /// the audible alert, so that only the non-overlapping extras — pre-alarm
-    /// heads-ups and the bedtime reminder — are scheduled here.
-    public func rebuild(alarms: [Alarm], settings: AppSettings, chainsEnabled: Bool = true) async {
+    /// `chainsEnabled` is false when the user has switched the chain off
+    /// under a system-level alarm backend, so that only the non-overlapping
+    /// extras — pre-alarm heads-ups and the bedtime reminder — are scheduled
+    /// here. `chainOffset` delays the first link when a system alarm carries
+    /// the first alert, so the chain re-summons rather than doubles up.
+    public func rebuild(
+        alarms: [Alarm],
+        settings: AppSettings,
+        chainsEnabled: Bool = true,
+        chainOffset: TimeInterval = 0
+    ) async {
         await clearRebuildable()
 
         let enabled = alarms.filter(\.isEnabled)
@@ -192,7 +202,7 @@ public final class NotificationScheduler: @unchecked Sendable {
         remaining -= await schedulePreAlarms(for: enabled, budget: min(remaining, 6))
 
         // 3. Spend everything left on dense chains, soonest occurrence first.
-        await scheduleChains(for: enabled, budget: remaining)
+        await scheduleChains(for: enabled, budget: remaining, offset: chainOffset)
 
         await scheduleBedtimeReminder(settings: settings)
 
@@ -309,7 +319,7 @@ public final class NotificationScheduler: @unchecked Sendable {
 
     // MARK: Chains
 
-    private func scheduleChains(for alarms: [Alarm], budget: Int) async {
+    private func scheduleChains(for alarms: [Alarm], budget: Int, offset: TimeInterval) async {
         guard budget > 0 else { return }
 
         // Flatten every upcoming occurrence, nearest first.
@@ -345,12 +355,12 @@ public final class NotificationScheduler: @unchecked Sendable {
             guard length > 0 else { break }
 
             for index in 0..<length {
-                let fireDate = occurrence.date.addingTimeInterval(chainSpacing * Double(index))
+                let fireDate = occurrence.date.addingTimeInterval(offset + chainSpacing * Double(index))
                 let content = UNMutableNotificationContent()
-                content.title = alarm.displayLabel
-                content.body = index == 0
+                content.title = index == 0 && offset == 0 ? alarm.displayLabel : "\(alarm.displayLabel) — still ringing"
+                content.body = index == 0 && offset == 0
                     ? (alarm.memo.isEmpty ? "Tap to turn off the alarm." : alarm.memo)
-                    : "Still ringing — tap to turn it off."
+                    : "Open SuperAlarm and finish the mission to turn it off."
                 content.categoryIdentifier = AlarmNotification.categoryAlarm
                 content.interruptionLevel = .timeSensitive
                 content.sound = UNNotificationSound(
@@ -457,6 +467,55 @@ public final class NotificationScheduler: @unchecked Sendable {
         await removePending(withPrefix: AlarmNotification.prefixWakeCheck, alarmID: alarmID)
     }
 
+    // MARK: Still-ringing nags
+
+    /// Reminders that land seconds after the user leaves a ringing app and
+    /// keep coming until they come back. Silent: while the app is alive its
+    /// own audio is still playing in the background, and if it has been
+    /// killed the system alarm backstops and the chain carry the sound. What
+    /// these add is the tap that puts the user straight back on the mission.
+    public func scheduleStillRingingNag(alarm: Alarm, occurrence: Date, from base: Date) async {
+        await cancelStillRingingNag(alarmID: alarm.id)
+
+        for (index, fireDate) in BackstopPolicy.nagDates(from: base).enumerated() {
+            let content = UNMutableNotificationContent()
+            content.title = "Alarm still ringing"
+            content.body = alarm.mission.type == .none
+                ? "Come back to SuperAlarm to turn it off."
+                : "Finish your \(alarm.mission.type.displayName) mission to turn it off."
+            content.categoryIdentifier = AlarmNotification.categoryAlarm
+            content.interruptionLevel = .timeSensitive
+            content.relevanceScore = 1.0
+            content.userInfo = [
+                AlarmNotification.keyAlarmID: alarm.id.uuidString,
+                AlarmNotification.keyKind: AlarmNotification.Kind.alarm.rawValue,
+                AlarmNotification.keyFireDate: occurrence.timeIntervalSince1970,
+                AlarmNotification.keyChainIndex: index,
+            ]
+
+            let request = UNNotificationRequest(
+                identifier: AlarmNotification.identifier(AlarmNotification.prefixNag, alarm.id, base, index),
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(
+                    timeInterval: max(1, fireDate.timeIntervalSince(base)),
+                    repeats: false
+                )
+            )
+            _ = await submit(request)
+        }
+    }
+
+    public func cancelStillRingingNag(alarmID: UUID) async {
+        await removePending(withPrefix: AlarmNotification.prefixNag, alarmID: alarmID)
+        let delivered = await center.deliveredNotifications()
+        let ids = delivered
+            .map(\.request.identifier)
+            .filter { AlarmNotification.prefix(of: $0) == AlarmNotification.prefixNag && AlarmNotification.alarmID(from: $0) == alarmID }
+        if !ids.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: ids)
+        }
+    }
+
     // MARK: Bedtime
 
     private func scheduleBedtimeReminder(settings: AppSettings) async {
@@ -502,6 +561,7 @@ public final class NotificationScheduler: @unchecked Sendable {
     public func cancelChain(for alarmID: UUID) async {
         await removePending(withPrefix: AlarmNotification.prefixChain, alarmID: alarmID)
         await removePending(withPrefix: AlarmNotification.prefixSnooze, alarmID: alarmID)
+        await removePending(withPrefix: AlarmNotification.prefixNag, alarmID: alarmID)
 
         let delivered = await center.deliveredNotifications()
         let ids = delivered

@@ -8,6 +8,8 @@ struct MissionRunnerView: View {
     var isPreview: Bool = false
     var onComplete: () -> Void
     var onGiveUp: () -> Void
+    /// Called with the new total after every passed round.
+    var onProgress: ((Int) -> Void)?
 
     @StateObject private var session: MissionSession
     @State private var elapsed: Int = 0
@@ -15,17 +17,27 @@ struct MissionRunnerView: View {
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    /// - Parameters:
+    ///   - startedAt: when the mission originally began. After a relaunch
+    ///     this is the persisted start, so elapsed time and step counts resume.
+    ///   - completedRounds: rounds already passed before a relaunch.
     init(
         settings: MissionSettings,
         isPreview: Bool = false,
+        startedAt: Date = Date(),
+        completedRounds: Int = 0,
         onComplete: @escaping () -> Void,
-        onGiveUp: @escaping () -> Void
+        onGiveUp: @escaping () -> Void,
+        onProgress: ((Int) -> Void)? = nil
     ) {
         self.settings = settings
         self.isPreview = isPreview
         self.onComplete = onComplete
         self.onGiveUp = onGiveUp
-        _session = StateObject(wrappedValue: MissionSession(settings: settings))
+        self.onProgress = onProgress
+        _session = StateObject(
+            wrappedValue: MissionSession(settings: settings, now: startedAt, completedRounds: completedRounds)
+        )
     }
 
     var body: some View {
@@ -50,13 +62,16 @@ struct MissionRunnerView: View {
             // one-second timer.
             let complete = onComplete
             let giveUp = onGiveUp
+            let progress = onProgress
             session.onComplete = { complete() }
             session.onTimeout = { giveUp() }
+            session.onProgress = { progress?($0) }
             session.startTimerIfNeeded()
         }
         .onDisappear {
             session.onComplete = nil
             session.onTimeout = nil
+            session.onProgress = nil
             session.stopTimer()
         }
         .onReceive(tick) { _ in

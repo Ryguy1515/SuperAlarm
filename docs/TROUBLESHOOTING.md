@@ -61,13 +61,13 @@ Check, in this order:
 3. Low Power Mode aggressively suspends background audio. It does not affect AlarmKit.
 
 **It rings twice, overlapping.**
-Turn off **Settings → Reliability → Extra notification backup**. That setting deliberately schedules a second, independent alert; it's off by default for this reason.
+On iOS 26 the first alert is the system alarm alone; the notification chain deliberately starts 45 seconds later and keeps re-summoning you until the mission is done, so a force-quit cannot end the alarm. If you would rather have the system alarm and its backstops only, turn off **Settings → Reliability → Extra notification backup**.
 
 **It's not loud enough.**
 Open the alarm's Sound screen and confirm **Override device volume** is on and the volume slider is at maximum. Pick a tone from the **Noisy** category — Air Raid, Police Siren and Battle Stations are the most aggressive. Turn **Gradually increase volume** off if you want full blast from the first second.
 
 **Volume buttons kill the alarm.**
-Expected on iOS 26: Apple made any physical button dismiss an alerting AlarmKit alarm. That's precisely why a **backstop alarm** is armed every time one starts — the next one lands two minutes later and keeps coming until the mission is genuinely completed.
+Expected on iOS 26 for the *system* alert: Apple made any physical button dismiss an alerting AlarmKit alarm. That's precisely why **backstop alarms** are armed together with every alarm — the first lands 30 seconds later and they keep coming until the mission is genuinely completed. Once the app is open and ringing, the side buttons only lower the volume for a frame; the volume lock puts it straight back and the ring screen shows *Volume restored*. (The system volume HUD does not appear inside the app; that is a side effect of the volume control, not a sign the buttons are being ignored.)
 
 **A mission won't recognise me.**
 Wait for the **"Can't complete this?"** link at the bottom of the mission screen (it appears after a couple of minutes, configurable per alarm), hold the button and type *"I give up"*. The alarm stops. Then switch that alarm to a deterministic mission — Math, Face ID, Barcode or Walk are far more reliable than camera-based object recognition in a dark bedroom.
@@ -76,7 +76,7 @@ Wait for the **"Can't complete this?"** link at the bottom of the mission screen
 It compares visual similarity, so it needs comparable lighting. Something photographed in daylight often won't match at 6am. Register the reference under the light you'll actually have, fill the frame, and pick something with strong texture. A barcode is the more reliable version of the same idea.
 
 **Step counting seems stuck.**
-The pedometer reports in batches every second or two rather than per step. Make sure **Settings → Privacy & Security → Motion & Fitness** is on for SuperAlarm.
+The pedometer reports in batches a few seconds behind your feet, so the counter jumps rather than ticking. The screen turns green with *Movement detected* the moment you start moving, before the first batch lands — if it does not, the phone is not moving with you: carry it, don't leave it on the bed. If the counter never moves at all, make sure **Settings → Privacy & Security → Motion & Fitness** is on for SuperAlarm; the mission tells you when it is off.
 
 ---
 

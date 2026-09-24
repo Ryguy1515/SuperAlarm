@@ -453,6 +453,11 @@ struct DiagnosticsView: View {
             ("Shared container", StorageLocation.hasSharedContainer ? "Yes" : "No (widget data unavailable)"),
             ("Runtime phase", runtime.phase.rawValue),
             ("Bundled sounds", missingTones.isEmpty ? "All present" : "\(missingTones.count) missing"),
+            ("Volume control", SystemVolume.shared.diagnosticStatus),
+            ("Output volume", "\(Int((SystemVolume.shared.current * 100).rounded()))%"),
+            ("If the app is killed", coordinator.reSummonDescription),
+            ("System alarms", coordinator.backendDiagnostics),
+            ("Saved ring state", runtime.hasPersistedRingState ? "Present — will resume on launch" : "None"),
         ]
     }
 

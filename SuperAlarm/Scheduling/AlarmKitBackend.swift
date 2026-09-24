@@ -69,11 +69,16 @@ struct SuperAlarmStopIntent: LiveActivityIntent {
     }
 }
 
-/// The secondary "Turn off" button. Silences the system alarm and brings the
-/// app to the front so the mission can run.
+/// The secondary "Start mission" button. Brings the app to the front so the
+/// mission can run.
+///
+/// Deliberately does *not* stop the system alarm here. The app stops it
+/// itself, in `AlarmRuntime`, only after its own audio is playing and the
+/// live backstop chain has been re-armed — so there is never a moment where
+/// nothing owned by the system is about to ring.
 @available(iOS 26.0, *)
 struct SuperAlarmOpenMissionIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "Turn off"
+    static var title: LocalizedStringResource = "Start mission"
     static var description = IntentDescription("Opens SuperAlarm to complete the wake-up mission.")
 
     /// `openAppWhenRun` is deprecated on iOS 26 in favour of `supportedModes`.
@@ -93,12 +98,6 @@ struct SuperAlarmOpenMissionIntent: LiveActivityIntent {
     }
 
     func perform() throws -> some IntentResult {
-        // Silence the system alarm; the app takes over with its own audio so
-        // that volume, gradual ramp and the mission UI are all under our
-        // control.
-        if let id = UUID(uuidString: systemAlarmID) {
-            try? AlarmManager.shared.stop(id: id)
-        }
         if let appID = UUID(uuidString: appAlarmID) {
             PendingMission.shared.arm(alarmID: appID)
         }
@@ -118,14 +117,18 @@ final class AlarmKitBackend: SystemAlarmBackend {
     private let defaults = StorageLocation.defaults
     private let scheduledKey = "alarmkit.scheduledIDs"
     private let backstopKey = "alarmkit.backstopIDs"
+    private let backstopModeKey = "alarmkit.backstopModes"
 
-    /// How many follow-up alarms trail the main one, and how far apart.
+    /// Why a follow-up chain exists, which decides who may replace it.
     ///
-    /// This exists because a physical button press dismisses an AlarmKit alarm
-    /// outright, and only *currently alerting* alarms are dismissed — so
-    /// spacing them out means one survives every button mash.
-    private let backstopCount = 5
-    private let backstopSpacing: TimeInterval = 120
+    /// * `preArmed` chains are scheduled with the alarm itself and refreshed
+    ///   on every rebuild.
+    /// * `live` chains belong to an alarm the app is ringing right now and are
+    ///   rolled forward by the runtime's heartbeat; a rebuild leaves them alone.
+    /// * `snooze` chains sit behind a snooze alarm; a rebuild leaves them alone.
+    private enum ChainMode: String {
+        case preArmed, live, snooze
+    }
 
     var isSupported: Bool { true }
 
@@ -164,19 +167,41 @@ final class AlarmKitBackend: SystemAlarmBackend {
         // AlarmKit's `Alarm` exposes no metadata, so the mapping from app
         // alarm to system alarm has to be tracked here to cancel precisely.
         var scheduled: [String: [String]] = [:]
+        var upcoming: [(alarm: AppAlarm, fire: Date)] = []
 
         for alarm in alarms where !alarm.isQuickAlarm || alarm.quickAlarmFireDate != nil {
-            guard let id = await schedulePrimary(for: alarm) else { continue }
+            guard let nextFire = alarm.nextFireDate() else { continue }
+            guard let id = await schedulePrimary(for: alarm, nextFire: nextFire) else { continue }
             scheduled[alarm.id.uuidString, default: []].append(id.uuidString)
+            upcoming.append((alarm, nextFire))
         }
 
         defaults.set(scheduled, forKey: scheduledKey)
+
+        // Pre-arm the follow-up chain behind the soonest occurrences, so that
+        // pressing Stop on the system alert and rolling over is not the end
+        // of it even if the app never runs. Chains that are live or behind a
+        // snooze belong to the runtime and are left alone.
+        upcoming.sort { $0.fire < $1.fire }
+        let chained = Set(upcoming.prefix(BackstopPolicy.preArmedOccurrenceLimit).map { $0.alarm.id })
+        for (raw, mode) in backstopModes() where mode == .preArmed {
+            guard let alarmID = UUID(uuidString: raw), !chained.contains(alarmID) else { continue }
+            cancelBackstops(alarmID: alarmID)
+        }
+        for entry in upcoming.prefix(BackstopPolicy.preArmedOccurrenceLimit) {
+            let current = backstopModes()[entry.alarm.id.uuidString]
+            if current == .live || current == .snooze { continue }
+            await replaceBackstops(
+                for: entry.alarm,
+                dates: BackstopPolicy.dates(from: entry.fire, offsets: BackstopPolicy.preArmedOffsets),
+                mode: .preArmed
+            )
+        }
+
         log.info("AlarmKit synced \(scheduled.count, privacy: .public) alarms")
     }
 
-    private func schedulePrimary(for alarm: AppAlarm) async -> UUID? {
-        guard let nextFire = alarm.nextFireDate() else { return nil }
-
+    private func schedulePrimary(for alarm: AppAlarm, nextFire: Date) async -> UUID? {
         let schedule: AlarmKit.Alarm.Schedule
         if alarm.repeatMode == .weekly, !alarm.repeatDays.isEmpty, !isMidnight(alarm) {
             schedule = .relative(
@@ -204,30 +229,119 @@ final class AlarmKitBackend: SystemAlarmBackend {
         )
     }
 
-    /// Arms the follow-up chain once an alarm has actually started ringing.
+    // MARK: Backstops
+
+    /// Arms the live follow-up chain from `base` — called the moment the app
+    /// starts ringing, and again on every relaunch into an outstanding ring.
+    /// New alarms are scheduled before the old ones are cancelled, so the
+    /// chain is never empty in between.
     func scheduleBackstops(for alarm: AppAlarm, from base: Date) async {
         guard isAuthorized else { return }
-        cancelBackstops(alarmID: alarm.id)
+        await replaceBackstops(
+            for: alarm,
+            dates: BackstopPolicy.dates(from: base, offsets: BackstopPolicy.liveOffsets),
+            mode: .live
+        )
+    }
 
-        var ids: [String] = []
-        for index in 1...backstopCount {
-            let fire = base.addingTimeInterval(backstopSpacing * Double(index))
+    /// Rolls the live chain forward while the app is alive and ringing.
+    ///
+    /// Any backstop that would fire within the next heartbeat window is moved
+    /// to the end of the chain, so it never interrupts a mission in progress —
+    /// but the instant the process dies, the heartbeat stops and the head of
+    /// the chain lands within `BackstopPolicy.firstOffset` seconds.
+    func refreshBackstops(for alarm: AppAlarm, now: Date) async {
+        guard isAuthorized else { return }
+        guard backstopModes()[alarm.id.uuidString] == .live else {
+            await scheduleBackstops(for: alarm, from: now)
+            return
+        }
+
+        var chain = backstopChain(for: alarm.id)
+        let horizon = now.addingTimeInterval(BackstopPolicy.firstOffset)
+        let expiring = chain.filter { $0.fire < horizon }
+        guard !expiring.isEmpty else { return }
+
+        var last = chain.map(\.fire).max() ?? now
+        var replacements: [(id: String, fire: Date)] = []
+        for _ in expiring {
+            last = last.addingTimeInterval(BackstopPolicy.liveTailSpacing)
+            guard
+                let id = await schedule(
+                    id: UUID(),
+                    appAlarm: alarm,
+                    schedule: .fixed(last),
+                    isBackstop: true,
+                    index: chain.count + replacements.count + 1
+                )
+            else { break }
+            replacements.append((id: id.uuidString, fire: last))
+        }
+
+        for entry in expiring {
+            if let id = UUID(uuidString: entry.id) {
+                try? manager.cancel(id: id)
+            }
+        }
+        chain.removeAll { entry in expiring.contains { $0.id == entry.id } }
+        chain.append(contentsOf: replacements)
+        storeBackstopChain(chain, for: alarm.id, mode: .live)
+    }
+
+    /// Schedules a fresh chain at `dates`, then cancels whatever chain the
+    /// alarm had before.
+    private func replaceBackstops(for alarm: AppAlarm, dates: [Date], mode: ChainMode) async {
+        let previous = backstopChain(for: alarm.id)
+
+        var chain: [(id: String, fire: Date)] = []
+        for (index, fire) in dates.enumerated() {
             guard
                 let id = await schedule(
                     id: UUID(),
                     appAlarm: alarm,
                     schedule: .fixed(fire),
                     isBackstop: true,
-                    index: index
+                    index: index + 1
                 )
             else { break }
-            ids.append(id.uuidString)
+            chain.append((id: id.uuidString, fire: fire))
         }
 
+        for entry in previous {
+            if let id = UUID(uuidString: entry.id) {
+                try? manager.cancel(id: id)
+            }
+        }
+        storeBackstopChain(chain, for: alarm.id, mode: mode)
+        log.info("Armed \(chain.count, privacy: .public) \(mode.rawValue, privacy: .public) backstops")
+    }
+
+    /// Stops every follow-up alarm for one app alarm. Only the coordinator
+    /// calls this, and only when `BackstopPolicy` says the event qualifies.
+    func cancelBackstops(alarmID: UUID) {
+        for entry in backstopChain(for: alarmID) {
+            if let id = UUID(uuidString: entry.id) {
+                try? manager.stop(id: id)
+                try? manager.cancel(id: id)
+            }
+        }
         var map = backstopMap()
-        map[alarm.id.uuidString] = ids
+        map[alarmID.uuidString] = nil
         defaults.set(map, forKey: backstopKey)
-        log.info("Armed \(ids.count, privacy: .public) backstop alarms")
+        var modes = defaults.dictionary(forKey: backstopModeKey) as? [String: String] ?? [:]
+        modes[alarmID.uuidString] = nil
+        defaults.set(modes, forKey: backstopModeKey)
+    }
+
+    /// Stops the system alarms for one app alarm that are alerting right
+    /// now, leaving everything scheduled for later in place. This is the
+    /// hand-over: the app has taken over with its own audio.
+    func stopAlerting(alarmID: UUID) {
+        let owned = Set((scheduledMap()[alarmID.uuidString] ?? []) + backstopChain(for: alarmID).map(\.id))
+        guard let live = try? manager.alarms else { return }
+        for systemAlarm in live where systemAlarm.state == .alerting && owned.contains(systemAlarm.id.uuidString) {
+            try? manager.stop(id: systemAlarm.id)
+        }
     }
 
     private func schedule(
@@ -332,6 +446,8 @@ final class AlarmKitBackend: SystemAlarmBackend {
 
     // MARK: Cancellation
 
+    /// Removes everything for one app alarm — used when the alarm is deleted
+    /// or disabled, never merely because it was dismissed.
     func cancel(alarmID: UUID) async {
         cancelBackstops(alarmID: alarmID)
 
@@ -346,30 +462,22 @@ final class AlarmKitBackend: SystemAlarmBackend {
         defaults.set(map, forKey: scheduledKey)
     }
 
-    /// Stops every follow-up alarm for one app alarm. Called the moment a
-    /// mission is verifiably completed.
-    func cancelBackstops(alarmID: UUID) {
-        var map = backstopMap()
-        guard let ids = map[alarmID.uuidString] else { return }
-        for raw in ids {
-            if let id = UUID(uuidString: raw) {
-                try? manager.stop(id: id)
-                try? manager.cancel(id: id)
-            }
-        }
-        map[alarmID.uuidString] = nil
-        defaults.set(map, forKey: backstopKey)
-    }
-
+    /// Schedules the snooze alarm and moves the follow-up chain behind it.
+    /// Snoozing is not completing the mission, so the chain does not end —
+    /// it just waits for the snooze.
     func scheduleSnooze(alarm: AppAlarm, at date: Date) async {
         guard isAuthorized else { return }
-        cancelBackstops(alarmID: alarm.id)
         _ = await schedule(
             id: UUID(),
             appAlarm: alarm,
             schedule: .fixed(date),
             isBackstop: false,
             index: 0
+        )
+        await replaceBackstops(
+            for: alarm,
+            dates: BackstopPolicy.dates(from: date, offsets: BackstopPolicy.snoozeOffsets),
+            mode: .snooze
         )
     }
 
@@ -382,7 +490,20 @@ final class AlarmKitBackend: SystemAlarmBackend {
         }
         defaults.removeObject(forKey: scheduledKey)
         defaults.removeObject(forKey: backstopKey)
+        defaults.removeObject(forKey: backstopModeKey)
     }
+
+    // MARK: Diagnostics
+
+    var diagnosticSummary: String {
+        let chains = backstopMap()
+        let count = chains.values.reduce(0) { $0 + $1.count }
+        let live = backstopModes().values.filter { $0 == .live }.count
+        let systemCount = (try? manager.alarms.count) ?? 0
+        return "\(systemCount) system alarms, \(count) backstops (\(live) live chain)"
+    }
+
+    // MARK: Bookkeeping
 
     private func cancelTrackedAlarms() {
         for ids in scheduledMap().values {
@@ -399,8 +520,32 @@ final class AlarmKitBackend: SystemAlarmBackend {
         defaults.dictionary(forKey: scheduledKey) as? [String: [String]] ?? [:]
     }
 
+    /// Alarm ID → ["<systemID>@<fireDate seconds>"].
     private func backstopMap() -> [String: [String]] {
         defaults.dictionary(forKey: backstopKey) as? [String: [String]] ?? [:]
+    }
+
+    private func backstopModes() -> [String: ChainMode] {
+        let raw = defaults.dictionary(forKey: backstopModeKey) as? [String: String] ?? [:]
+        return raw.compactMapValues(ChainMode.init(rawValue:))
+    }
+
+    private func backstopChain(for alarmID: UUID) -> [(id: String, fire: Date)] {
+        (backstopMap()[alarmID.uuidString] ?? []).compactMap { raw in
+            let parts = raw.split(separator: "@", maxSplits: 1).map(String.init)
+            guard let first = parts.first else { return nil }
+            let seconds = parts.count > 1 ? Double(parts[1]) ?? 0 : 0
+            return (first, Date(timeIntervalSince1970: seconds))
+        }
+    }
+
+    private func storeBackstopChain(_ chain: [(id: String, fire: Date)], for alarmID: UUID, mode: ChainMode) {
+        var map = backstopMap()
+        map[alarmID.uuidString] = chain.map { "\($0.id)@\(Int($0.fire.timeIntervalSince1970))" }
+        defaults.set(map, forKey: backstopKey)
+        var modes = defaults.dictionary(forKey: backstopModeKey) as? [String: String] ?? [:]
+        modes[alarmID.uuidString] = mode.rawValue
+        defaults.set(modes, forKey: backstopModeKey)
     }
 }
 #endif

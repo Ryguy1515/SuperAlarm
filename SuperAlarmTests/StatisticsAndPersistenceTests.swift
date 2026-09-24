@@ -310,7 +310,7 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(empty.theme, .system)
         XCTAssertFalse(empty.use24HourClock)
         XCTAssertTrue(empty.lockVolumeWhileRinging)
-        XCTAssertFalse(empty.redundantNotificationBackup)
+        XCTAssertTrue(empty.redundantNotificationBackup, "The re-summon chain must be on unless the user turns it off")
         XCTAssertFalse(empty.hasCompletedOnboarding)
     }
 

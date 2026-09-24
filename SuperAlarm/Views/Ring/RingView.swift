@@ -25,6 +25,12 @@ struct RingContainerView: View {
                 Color.clear
             }
         }
+        .overlay(alignment: .top) {
+            if runtime.phase == .ringing || runtime.phase == .mission || runtime.phase == .wakeCheckRinging {
+                VolumeLockBadge()
+                    .padding(.top, 10)
+            }
+        }
         .animation(.easeInOut(duration: 0.25), value: runtime.phase)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
@@ -36,16 +42,57 @@ struct RingContainerView: View {
             MissionRunnerView(
                 settings: alarm.mission,
                 isPreview: false,
+                startedAt: runtime.missionStartedAt ?? Date(),
+                completedRounds: runtime.missionCompletedRounds,
                 onComplete: { runtime.completeMission() },
                 onGiveUp: {
                     // Giving up still stops the alarm — it is recorded as a
                     // failure but the user is never trapped.
                     runtime.registerMissionFailure()
                     runtime.completeMission()
-                }
+                },
+                onProgress: { runtime.noteMissionProgress(completedRounds: $0) }
             )
+            // Keyed on the mission start so a resumed mission is built once,
+            // from the persisted progress, rather than on every render.
+            .id(runtime.missionStartedAt)
         } else {
             Color.clear
+        }
+    }
+}
+
+// MARK: - Volume lock badge
+
+/// Tells the user the side buttons will not help. The hidden volume control
+/// suppresses the system volume HUD, so this is the only feedback that a
+/// button press was undone.
+struct VolumeLockBadge: View {
+    @ObservedObject private var audio = AlarmAudioEngine.shared
+    @State private var flash = false
+
+    var body: some View {
+        if audio.isVolumeLocked {
+            HStack(spacing: 6) {
+                Image(systemName: flash ? "speaker.wave.3.fill" : "lock.fill")
+                    .font(.system(size: 12, weight: .bold))
+                Text(flash ? "Volume restored" : "Volume locked")
+                    .font(SAFont.caption(12))
+            }
+            .foregroundStyle(flash ? SAColor.ink : SAColor.textSecondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(flash ? SAColor.accent : SAColor.surface))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(flash ? "Volume restored to full" : "Volume is locked; the side buttons will not lower it")
+            .onChange(of: audio.volumeRestoreCount) { _, _ in
+                withAnimation(.easeOut(duration: 0.15)) { flash = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    Task { @MainActor in
+                        withAnimation(.easeIn(duration: 0.3)) { flash = false }
+                    }
+                }
+            }
         }
     }
 }

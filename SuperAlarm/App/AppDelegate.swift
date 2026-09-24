@@ -23,8 +23,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         store?.flush()
     }
 
+    /// Fires when the app switcher opens — the last moment before a
+    /// force-quit that the app is guaranteed to run. The runtime uses it to
+    /// arm the still-ringing reminders.
+    func applicationWillResignActive(_ application: UIApplication) {
+        runtime?.handleResignActive()
+    }
+
     func applicationWillTerminate(_ application: UIApplication) {
         store?.flush()
+        runtime?.handleTermination()
     }
 
     // MARK: - Notification delegate
@@ -42,10 +50,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         let isAlreadyRinging = await MainActor.run { runtime?.isPresenting ?? false }
 
-        // Suppress the notification's own sound when the audio engine is
-        // already playing, otherwise the two stack into a mess.
+        // While the ring screen is up the chain and the still-ringing nags
+        // are redundant: keep them out of the way entirely rather than
+        // stacking banners and sounds on top of the alarm.
         if isAlreadyRinging {
-            return [.banner, .list]
+            switch info.kind {
+            case .alarm, .snooze, .safetyNet, .wakeCheck:
+                return [.list]
+            case .preAlarm, .bedtime, .none:
+                return [.banner, .list]
+            }
         }
         return [.banner, .list, .sound]
     }

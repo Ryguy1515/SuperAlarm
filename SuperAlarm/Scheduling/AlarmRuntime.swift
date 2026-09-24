@@ -23,6 +23,15 @@ struct PersistedRingState: Codable {
     var playedToneID: String?
     /// Occurrences already dealt with, so the same alarm is not re-triggered.
     var handledOccurrences: [String: Date] = [:]
+
+    // Mission progress, so a relaunch lands back in the mission that is
+    // still owed rather than on a fresh ring. All optional: older state
+    // files predate them.
+    var missionIntent: String?
+    var missionStartedAt: Date?
+    var missionCompletedRounds: Int?
+    var accumulatedMissionSeconds: Double?
+    var missionFailures: Int?
 }
 
 // MARK: - Runtime
@@ -67,6 +76,11 @@ public final class AlarmRuntime: ObservableObject {
     @Published public private(set) var playingToneID: String?
     /// Ticks every second so views can render live countdowns.
     @Published public private(set) var now = Date()
+    /// Rounds passed in the mission on screen, persisted for a relaunch.
+    @Published public private(set) var missionCompletedRounds = 0
+    /// When the mission on screen began. Stable across re-renders and
+    /// relaunches, so the mission runner (and the pedometer) resume from it.
+    @Published public private(set) var missionStartedAt: Date?
 
     /// True whenever a full-screen takeover should be on screen.
     public var isPresenting: Bool {
@@ -89,7 +103,7 @@ public final class AlarmRuntime: ObservableObject {
     /// What completing the current mission should actually do. Snoozing and
     /// confirming the wake-up check can both be configured to require the
     /// mission, so the mission screen is reused for all three.
-    private enum MissionIntent {
+    private enum MissionIntent: String {
         case dismiss
         case snooze
         case confirmAwake
@@ -100,10 +114,25 @@ public final class AlarmRuntime: ObservableObject {
     private var currentRecord: WakeRecord?
     private var handledOccurrences: [String: Date] = [:]
     private var wakeCheckFireAt: Date?
-    private var missionStartedAt: Date?
     private var accumulatedMissionSeconds: Double = 0
     private var missionFailures = 0
+    /// Set once the current mission's time has been added to the total, so
+    /// `missionStartedAt` can stay put as the mission's identity.
+    private var missionTimeAccrued = false
     private var isBootstrapped = false
+    /// True once the still-ringing reminders have been armed for this ring.
+    private var nagArmed = false
+
+    /// Phases in which the alarm is audible and the live backstop chain must
+    /// be kept ahead of the process.
+    private var isAudiblePhase: Bool {
+        phase == .ringing || phase == .mission || phase == .wakeCheckRinging
+    }
+
+    /// True when a ring is saved on disk and would resume on the next launch.
+    public var hasPersistedRingState: Bool {
+        files.load(PersistedRingState.self, from: StorageLocation.ringStateFile) != nil
+    }
 
     /// How far past an alarm's time we will still ring when the app was not
     /// running. Beyond this the occurrence is logged as missed.
@@ -180,14 +209,49 @@ public final class AlarmRuntime: ObservableObject {
     public func handleForeground() {
         now = Date()
         audio.stopKeepAlive()
+        SystemVolume.shared.prepare()
         consumePendingMission()
         evaluate()
+
+        // Back on the ring screen: the reminders have done their job.
+        if nagArmed, let alarm = activeAlarm {
+            nagArmed = false
+            Task { await coordinator.cancelStillRingingNag(alarmID: alarm.id) }
+        }
     }
 
     public func handleBackground() {
         store?.flush()
         persistState()
         updateKeepAlive()
+        armDefencesForLeaving()
+    }
+
+    /// The app switcher is opening, or a call is coming in. This is the last
+    /// moment before a force-quit the app is guaranteed to run, so the
+    /// defences are armed here as well as on backgrounding.
+    public func handleResignActive() {
+        persistState()
+        armDefencesForLeaving()
+    }
+
+    /// Best effort: the process is being torn down. Anything scheduled here
+    /// may not make it, which is why the chains are already armed.
+    public func handleTermination() {
+        persistState()
+        armDefencesForLeaving()
+    }
+
+    /// Re-arms the live backstops from now and schedules the still-ringing
+    /// reminders, so leaving the app is answered within seconds.
+    private func armDefencesForLeaving() {
+        guard isAudiblePhase, let alarm = activeAlarm else { return }
+        let occurrence = occurrenceDate ?? Date()
+        nagArmed = true
+        Task {
+            await coordinator.refreshBackstops(for: alarm)
+            await coordinator.scheduleStillRingingNag(for: alarm, occurrence: occurrence)
+        }
     }
 
     /// Runs the near-silent background loop only when it is actually needed:
@@ -258,6 +322,18 @@ public final class AlarmRuntime: ObservableObject {
         case .idle:
             checkForDueAlarms(in: store, reference: reference)
         }
+
+        heartbeatBackstops(reference: reference)
+    }
+
+    /// Keeps the live follow-up chain ahead of a ringing app. While the
+    /// process is alive the head of the chain is pushed back before it can
+    /// fire; the moment the process dies it stops being pushed and the next
+    /// backstop lands within `BackstopPolicy.firstOffset` seconds.
+    private func heartbeatBackstops(reference: Date) {
+        guard isAudiblePhase, let alarm = activeAlarm else { return }
+        guard BackstopPolicy.heartbeatIsDue(lastArmedAt: coordinator.lastBackstopArmAt, now: reference) else { return }
+        Task { await coordinator.refreshBackstops(for: alarm) }
     }
 
     /// Stops an alarm that has been ringing unattended for its whole window.
@@ -269,7 +345,7 @@ public final class AlarmRuntime: ObservableObject {
 
         log.info("Auto-stopping alarm after \(minutes, privacy: .public) minutes")
         finishRecord(outcome: .rangOut)
-        teardown()
+        teardown(on: .rangOut)
     }
 
     private func checkForDueAlarms(in store: AlarmStore, reference: Date) {
@@ -360,12 +436,18 @@ public final class AlarmRuntime: ObservableObject {
 
         Task {
             await coordinator.cancelWakeUpCheck(alarmID: alarm.id)
-            // Arm the follow-up chain. If the user silences this alarm with a
-            // side button and rolls over, the next one lands two minutes later
-            // — and only a completed mission stands the chain down.
-            await coordinator.armBackstops(for: alarm)
+            await takeOverFromSystem(alarm: alarm)
         }
         log.info("Ringing alarm \(alarm.id.uuidString, privacy: .public)")
+    }
+
+    /// Arms the live follow-up chain from now and only then stops whatever
+    /// the system is alerting for this alarm. The order matters: the app's
+    /// audio is already playing, and there must never be a moment where
+    /// nothing owned by the system is about to ring.
+    private func takeOverFromSystem(alarm: Alarm) async {
+        await coordinator.armBackstops(for: alarm)
+        coordinator.stopSystemAlert(alarmID: alarm.id)
     }
 
     private func beginAudio(for alarm: Alarm) {
@@ -436,7 +518,7 @@ public final class AlarmRuntime: ObservableObject {
 
     private func resumeFromSnooze() {
         guard let alarm = activeAlarm else {
-            teardown()
+            teardown(on: .forceStopped)
             return
         }
         snoozeEndsAt = nil
@@ -444,6 +526,9 @@ public final class AlarmRuntime: ObservableObject {
         firedAt = firedAt ?? Date()
         beginAudio(for: alarm)
         persistState()
+        // The system snooze alarm fires at the same instant; the app's audio
+        // takes over from it exactly as it does from the first alert.
+        Task { await takeOverFromSystem(alarm: alarm) }
     }
 
     /// Cuts a snooze short.
@@ -470,6 +555,8 @@ public final class AlarmRuntime: ObservableObject {
     private func beginMission(intent: MissionIntent) {
         missionIntent = intent
         missionStartedAt = Date()
+        missionTimeAccrued = false
+        missionCompletedRounds = 0
         phase = .mission
         persistState()
     }
@@ -479,12 +566,22 @@ public final class AlarmRuntime: ObservableObject {
         guard phase == .mission else { return }
         accrueMissionTime()
         missionIntent = .dismiss
+        missionCompletedRounds = 0
         phase = .ringing
         persistState()
     }
 
     public func registerMissionFailure() {
         missionFailures += 1
+        persistState()
+    }
+
+    /// A round was passed. Saved immediately so a relaunch resumes from the
+    /// same round rather than from the beginning.
+    public func noteMissionProgress(completedRounds: Int) {
+        guard phase == .mission else { return }
+        missionCompletedRounds = max(missionCompletedRounds, completedRounds)
+        persistState()
     }
 
     /// The mission was completed. What that earns depends on why it was run.
@@ -505,9 +602,9 @@ public final class AlarmRuntime: ObservableObject {
     }
 
     private func accrueMissionTime() {
-        if let started = missionStartedAt {
+        if let started = missionStartedAt, !missionTimeAccrued {
             accumulatedMissionSeconds += Date().timeIntervalSince(started)
-            missionStartedAt = nil
+            missionTimeAccrued = true
         }
     }
 
@@ -515,7 +612,7 @@ public final class AlarmRuntime: ObservableObject {
 
     public func dismiss() {
         guard let alarm = activeAlarm else {
-            teardown()
+            teardown(on: .forceStopped)
             return
         }
 
@@ -524,9 +621,13 @@ public final class AlarmRuntime: ObservableObject {
         VoiceBriefing.shared.stop()
 
         // The mission is verifiably done, so the follow-up chain can stand
-        // down. This is the only place that happens.
-        coordinator.standDownBackstops(alarmID: alarm.id)
-        Task { await coordinator.silence(alarmID: alarm.id) }
+        // down. `BackstopPolicy` is the gatekeeper for every stand-down.
+        coordinator.standDownBackstops(alarmID: alarm.id, on: .missionCompleted)
+        nagArmed = false
+        Task {
+            await coordinator.silence(alarmID: alarm.id)
+            await coordinator.cancelStillRingingNag(alarmID: alarm.id)
+        }
 
         if alarm.wakeUpCheck.isEnabled {
             let fireAt = Date().addingTimeInterval(TimeInterval(alarm.wakeUpCheck.delayMinutes * 60))
@@ -553,7 +654,7 @@ public final class AlarmRuntime: ObservableObject {
             log.info("Wake-up check armed for \(fireAt, privacy: .public), re-ring at \(reRingAt, privacy: .public)")
         } else {
             finishRecord(outcome: .dismissed)
-            teardown()
+            teardown(on: .missionCompleted)
         }
     }
 
@@ -561,7 +662,7 @@ public final class AlarmRuntime: ObservableObject {
 
     private func beginWakeCheck() {
         guard let alarm = activeAlarm else {
-            teardown()
+            teardown(on: .forceStopped)
             return
         }
 
@@ -570,6 +671,8 @@ public final class AlarmRuntime: ObservableObject {
         phase = .wakeCheckRinging
         beginAudio(for: alarm)
         persistState()
+        // The check is audible and must survive a kill like any other ring.
+        Task { await coordinator.armBackstops(for: alarm) }
         log.info("Wake-up check started")
     }
 
@@ -590,7 +693,7 @@ public final class AlarmRuntime: ObservableObject {
     public func confirmAwake() {
         guard phase == .wakeCheckRinging || phase == .wakeCheckPending else { return }
         guard let alarm = activeAlarm else {
-            teardown()
+            teardown(on: .forceStopped)
             return
         }
 
@@ -613,21 +716,21 @@ public final class AlarmRuntime: ObservableObject {
 
         if let alarm = activeAlarm {
             // Stand down both the check itself and the re-ring armed behind it.
-            coordinator.standDownBackstops(alarmID: alarm.id)
+            coordinator.standDownBackstops(alarmID: alarm.id, on: .wakeCheckConfirmed)
             Task {
                 await coordinator.cancelWakeUpCheck(alarmID: alarm.id)
                 await coordinator.cancelSnooze(alarmID: alarm.id)
                 await coordinator.silence(alarmID: alarm.id)
             }
         }
-        teardown()
+        teardown(on: .wakeCheckConfirmed)
         log.info("Wake-up check confirmed")
     }
 
     /// The window elapsed without confirmation, so the alarm comes back.
     private func failWakeCheck() {
         guard let alarm = activeAlarm else {
-            teardown()
+            teardown(on: .forceStopped)
             return
         }
 
@@ -638,8 +741,12 @@ public final class AlarmRuntime: ObservableObject {
         firedAt = Date()
 
         // This process is handling the re-ring, so stand down the scheduled
-        // one that was armed as the backup.
-        Task { await coordinator.cancelSnooze(alarmID: alarm.id) }
+        // one that was armed as the backup — and arm the live chain behind
+        // this ring, which a kill must not end.
+        Task {
+            await coordinator.cancelSnooze(alarmID: alarm.id)
+            await takeOverFromSystem(alarm: alarm)
+        }
 
         beginAudio(for: alarm)
         persistState()
@@ -667,13 +774,17 @@ public final class AlarmRuntime: ObservableObject {
         currentRecord = nil
     }
 
-    private func teardown() {
+    /// Ends the ring. `event` says why, and `BackstopPolicy` decides whether
+    /// that reason is allowed to stand the follow-up chain down.
+    private func teardown(on event: BackstopPolicy.Event) {
         audio.stopAlarm()
         VoiceBriefing.shared.stop()
         PendingMission.shared.clear()
 
         if let alarm = activeAlarm {
-            coordinator.standDownBackstops(alarmID: alarm.id)
+            coordinator.standDownBackstops(alarmID: alarm.id, on: event)
+            nagArmed = false
+            Task { await coordinator.cancelStillRingingNag(alarmID: alarm.id) }
         }
 
         phase = .idle
@@ -684,6 +795,7 @@ public final class AlarmRuntime: ObservableObject {
         wakeCheckFireAt = nil
         wakeCheckDeadline = nil
         missionStartedAt = nil
+        missionCompletedRounds = 0
         accumulatedMissionSeconds = 0
         missionFailures = 0
         snoozeCount = 0
@@ -701,7 +813,7 @@ public final class AlarmRuntime: ObservableObject {
     /// Emergency exit used by the diagnostics screen if something wedges.
     public func forceStop() {
         finishRecord(outcome: .dismissed)
-        teardown()
+        teardown(on: .forceStopped)
     }
 
     // MARK: - Occurrence bookkeeping
@@ -736,7 +848,12 @@ public final class AlarmRuntime: ObservableObject {
             wakeCheckDeadline: wakeCheckDeadline,
             recordID: currentRecord?.id,
             playedToneID: playingToneID,
-            handledOccurrences: handledOccurrences
+            handledOccurrences: handledOccurrences,
+            missionIntent: missionIntent.rawValue,
+            missionStartedAt: missionStartedAt,
+            missionCompletedRounds: missionCompletedRounds,
+            accumulatedMissionSeconds: accumulatedMissionSeconds,
+            missionFailures: missionFailures
         )
         files.saveNow(state, to: StorageLocation.ringStateFile)
     }
@@ -750,42 +867,67 @@ public final class AlarmRuntime: ObservableObject {
             return
         }
 
-        activeAlarm = alarm
-        occurrenceDate = state.occurrenceDate
-        firedAt = state.firedAt
-        snoozeCount = state.snoozeCount
-        snoozeEndsAt = state.snoozeEndsAt
-        wakeCheckFireAt = state.wakeCheckFireAt
-        wakeCheckDeadline = state.wakeCheckDeadline
-        playingToneID = state.playedToneID
+        let plan = RingStateRestorePlan.make(from: state, now: Date())
+        switch plan {
+        case .nothing:
+            files.delete(StorageLocation.ringStateFile)
+            return
 
-        var record = WakeRecord(
-            alarmID: alarm.id,
-            alarmLabel: alarm.displayLabel,
-            scheduledFor: state.occurrenceDate,
-            firedAt: state.firedAt
-        )
-        record.missionType = alarm.mission.type
-        record.snoozeCount = state.snoozeCount
-        currentRecord = record
+        case .discardAsStale:
+            // Too old to ring now, but the history should say what happened.
+            var record = WakeRecord(
+                alarmID: alarm.id,
+                alarmLabel: alarm.displayLabel,
+                scheduledFor: state.occurrenceDate,
+                firedAt: state.firedAt
+            )
+            record.missionType = alarm.mission.type
+            record.snoozeCount = state.snoozeCount
+            record.outcome = .rangOut
+            store.record(record)
+            files.delete(StorageLocation.ringStateFile)
+            coordinator.standDownBackstops(alarmID: alarm.id, on: .rangOut)
+            log.info("Discarded stale ring state from \(state.firedAt, privacy: .public)")
+            return
 
-        // A mission in progress is resumed as a plain ring: the puzzle itself
-        // cannot be restored, and silently discarding the alarm would be worse.
-        switch state.phase {
-        case .mission, .ringing:
-            phase = .ringing
-            beginAudio(for: alarm)
-        case .snoozed:
-            phase = .snoozed
-        case .wakeCheckPending:
-            phase = .wakeCheckPending
-        case .wakeCheckRinging:
-            phase = .wakeCheckRinging
-            beginAudio(for: alarm)
-        case .idle:
-            phase = .idle
+        case .resume(let resumedPhase, let restartAudio):
+            activeAlarm = alarm
+            occurrenceDate = state.occurrenceDate
+            firedAt = state.firedAt
+            snoozeCount = state.snoozeCount
+            snoozeEndsAt = state.snoozeEndsAt
+            wakeCheckFireAt = state.wakeCheckFireAt
+            wakeCheckDeadline = state.wakeCheckDeadline
+            playingToneID = state.playedToneID
+            missionIntent = state.missionIntent.flatMap(MissionIntent.init(rawValue:)) ?? .dismiss
+            missionStartedAt = state.missionStartedAt
+            missionCompletedRounds = state.missionCompletedRounds ?? 0
+            accumulatedMissionSeconds = state.accumulatedMissionSeconds ?? 0
+            missionFailures = state.missionFailures ?? 0
+
+            var record = WakeRecord(
+                alarmID: alarm.id,
+                alarmLabel: alarm.displayLabel,
+                scheduledFor: state.occurrenceDate,
+                firedAt: state.firedAt
+            )
+            record.missionType = alarm.mission.type
+            record.snoozeCount = state.snoozeCount
+            currentRecord = record
+
+            if resumedPhase == .mission, missionStartedAt == nil {
+                // Older state without a start time: the runner needs one.
+                missionStartedAt = Date()
+            }
+
+            phase = resumedPhase
+            if restartAudio {
+                beginAudio(for: alarm)
+                // The process was gone, so the live chain was not being kept
+                // ahead; re-arm it from now and stop anything alerting.
+                Task { await takeOverFromSystem(alarm: alarm) }
+            }
+            log.info("Restored ring state in phase \(resumedPhase.rawValue, privacy: .public)")
         }
-
-        log.info("Restored ring state in phase \(state.phase.rawValue, privacy: .public)")
     }
 }

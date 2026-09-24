@@ -93,7 +93,7 @@ Do this the evening before you first rely on it.
 1. **Settings → Diagnostics.** Confirm *Alarm mechanism* reads **AlarmKit** (iOS 26+) or **Notifications**, that authorisation says Yes, and that *Bundled sounds* says **All present**.
 2. **Test the whole flow without waiting.** Open an alarm → **Test this alarm now**. The ring screen appears, the mission runs, the wake-up check follows.
 3. **Test it for real while backgrounded.** Set an alarm 2 minutes out, lock the phone, put it face down, wait.
-4. **Test the defences.** While it rings, press the volume-down button — the level should climb back. Force-quit the app — a backstop alarm should still arrive.
+4. **Test the defences.** While it rings, press the volume-down button — the sound dips for a moment and comes straight back, and the ring screen flashes *Volume restored*. Swipe home — it keeps ringing and a *still ringing* notification lands within seconds. Force-quit it from the app switcher — a *Still asleep?* alarm lands within about 30 seconds, and reopening the app puts you back on the ring screen with the mission still owed.
 5. **Test silent mode.** Flip the ringer switch to silent and repeat step 3.
 
 ---

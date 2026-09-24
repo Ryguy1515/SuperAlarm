@@ -99,9 +99,10 @@ public struct AppSettings: Codable, Hashable, Sendable {
     /// How far ahead of an alarm the keep-alive loop starts.
     public var keepAliveWindowHours: Int = 12
     /// Schedule the notification chain even when the system alarm backend is
-    /// active. Off by default because the two alert independently and stack
-    /// audibly; worth turning on only if system alarms prove unreliable.
-    public var redundantNotificationBackup: Bool = false
+    /// active. On by default: it is the layer that keeps re-summoning the
+    /// user after the app is force-quit. When system alarms are active the
+    /// chain is offset so it does not double up with the first alert.
+    public var redundantNotificationBackup: Bool = true
 
     // Weather --------------------------------------------------------------
     public var showWeather: Bool = true
@@ -142,7 +143,7 @@ public struct AppSettings: Codable, Hashable, Sendable {
         lockVolumeWhileRinging = c.decodeOr(.lockVolumeWhileRinging, true)
         backgroundKeepAlive = c.decodeOr(.backgroundKeepAlive, true)
         keepAliveWindowHours = c.decodeOr(.keepAliveWindowHours, 12)
-        redundantNotificationBackup = c.decodeOr(.redundantNotificationBackup, false)
+        redundantNotificationBackup = c.decodeOr(.redundantNotificationBackup, true)
         showWeather = c.decodeOr(.showWeather, true)
         temperatureUnit = c.decodeOr(.temperatureUnit, TemperatureUnit.celsius)
         sleepSound = c.decodeOr(.sleepSound, SleepSoundSettings())

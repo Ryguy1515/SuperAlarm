@@ -15,32 +15,44 @@ public protocol SystemAlarmBackend: AnyObject {
     /// True once the user has granted permission.
     var isAuthorized: Bool { get }
     func requestAuthorization() async -> Bool
-    /// Replaces every scheduled system alarm with the given set.
+    /// Replaces every scheduled system alarm with the given set, including
+    /// the pre-armed follow-up chains behind the soonest occurrences.
     func sync(alarms: [Alarm]) async
+    /// Removes everything for one alarm — deletion, not dismissal.
     func cancel(alarmID: UUID) async
     func scheduleSnooze(alarm: Alarm, at date: Date) async
     func cancelAll() async
 
-    /// Arms the follow-up alarms that keep firing until a mission is actually
-    /// completed. Necessary because a physical button press dismisses the
-    /// alarm that is currently sounding — but only that one.
+    /// Arms the live follow-up chain from `base`. Necessary because a
+    /// physical button press dismisses the alarm that is currently sounding —
+    /// but only that one.
     func scheduleBackstops(for alarm: Alarm, from base: Date) async
+    /// Rolls the live chain forward while the app is alive and ringing.
+    func refreshBackstops(for alarm: Alarm, now: Date) async
     /// Stands the follow-up chain down once the mission is verified complete.
     func cancelBackstops(alarmID: UUID)
+    /// Stops whatever is alerting for this alarm right now, leaving anything
+    /// scheduled for later untouched.
+    func stopAlerting(alarmID: UUID)
+    /// One line for the Diagnostics screen.
+    var diagnosticSummary: String { get }
 }
 
 public extension SystemAlarmBackend {
     func scheduleBackstops(for alarm: Alarm, from base: Date) async {}
+    func refreshBackstops(for alarm: Alarm, now: Date) async {}
     func cancelBackstops(alarmID: UUID) {}
+    func stopAlerting(alarmID: UUID) {}
+    var diagnosticSummary: String { "Unavailable" }
 }
 
 /// Fans scheduling out to every available mechanism.
 ///
 /// Redundancy is deliberate: AlarmKit is the loudest and most reliable, but
 /// the notification chain is kept in place underneath it so that a revoked
-/// permission, an OS quirk, or a downgrade cannot leave the user with no alarm
-/// at all. Duplicate audible alerts are avoided because dismissing an alarm
-/// clears every pending request associated with it.
+/// permission, an OS quirk, a force-quit or a downgrade cannot leave the user
+/// with no alarm at all. When system alarms carry the first alert the chain
+/// is offset so the two do not sound on top of each other.
 @MainActor
 public final class AlarmCoordinator: ObservableObject {
     public static let shared = AlarmCoordinator()
@@ -55,6 +67,8 @@ public final class AlarmCoordinator: ObservableObject {
     @Published public private(set) var systemAlarmsAuthorized = false
     @Published public private(set) var lastRebuildAt: Date?
     @Published public private(set) var pendingNotificationCount = 0
+    /// Last time the live backstop chain was armed or rolled forward.
+    @Published public private(set) var lastBackstopArmAt: Date?
 
     private var rebuildTask: Task<Void, Never>?
 
@@ -70,6 +84,15 @@ public final class AlarmCoordinator: ObservableObject {
 
     public var systemBackendName: String {
         systemBackend?.isSupported == true ? "AlarmKit" : "Notifications"
+    }
+
+    /// What will bring the user back if the app is killed.
+    public var reSummonDescription: String {
+        usesSystemAlarms ? "AlarmKit backstops + notification chain" : "Notification chain"
+    }
+
+    public var backendDiagnostics: String {
+        systemBackend?.diagnosticSummary ?? "No system backend"
     }
 
     // MARK: Authorization
@@ -113,12 +136,17 @@ public final class AlarmCoordinator: ObservableObject {
     }
 
     private func performRebuild(alarms: [Alarm], settings: AppSettings) async {
-        // When AlarmKit is doing the work, the notification chain is muted so
-        // the user does not get two overlapping alerts for one alarm. The
-        // chain is still scheduled — silently — if the user explicitly opts
-        // into the redundant backup.
+        // With system alarms active the chain is the re-summon layer: it is
+        // kept, but offset past the first alert so the two never stack. The
+        // user can still switch it off.
         let chainsEnabled = !usesSystemAlarms || settings.redundantNotificationBackup
-        await notifications.rebuild(alarms: alarms, settings: settings, chainsEnabled: chainsEnabled)
+        let chainOffset = usesSystemAlarms ? BackstopPolicy.chainOffsetWithSystemAlarms : 0
+        await notifications.rebuild(
+            alarms: alarms,
+            settings: settings,
+            chainsEnabled: chainsEnabled,
+            chainOffset: chainOffset
+        )
 
         if let backend = systemBackend, backend.isSupported {
             await backend.sync(alarms: alarms.filter(\.isEnabled))
@@ -131,16 +159,24 @@ public final class AlarmCoordinator: ObservableObject {
 
     // MARK: Per-alarm operations
 
+    /// Removes everything for an alarm. Deletion, not dismissal.
     public func cancel(alarmID: UUID) async {
         await notifications.cancelEverything(for: alarmID)
         await systemBackend?.cancel(alarmID: alarmID)
     }
 
-    /// Clears the audible chain for an alarm without touching its long-term
-    /// safety nets — used the moment an alarm is dismissed.
+    /// Clears the audible chain for an alarm and stops whatever the system is
+    /// alerting for it right now, without touching its long-term safety nets
+    /// or its follow-up chain.
     public func silence(alarmID: UUID) async {
         await notifications.cancelChain(for: alarmID)
-        await systemBackend?.cancel(alarmID: alarmID)
+        systemBackend?.stopAlerting(alarmID: alarmID)
+    }
+
+    /// The hand-over: the app's own audio is playing, so the system alert
+    /// that summoned it can stop. Call only after the live chain is armed.
+    public func stopSystemAlert(alarmID: UUID) {
+        systemBackend?.stopAlerting(alarmID: alarmID)
     }
 
     public func scheduleSnooze(alarm: Alarm, at date: Date) async {
@@ -148,14 +184,28 @@ public final class AlarmCoordinator: ObservableObject {
         await systemBackend?.scheduleSnooze(alarm: alarm, at: date)
     }
 
-    /// Arms the follow-up chain when an alarm starts ringing.
+    /// Arms the live follow-up chain when an alarm starts ringing.
     public func armBackstops(for alarm: Alarm) async {
         await systemBackend?.scheduleBackstops(for: alarm, from: Date())
+        lastBackstopArmAt = Date()
     }
 
-    /// Stands the follow-up chain down once the mission is verified complete.
-    public func standDownBackstops(alarmID: UUID) {
+    /// Keeps the live chain ahead of a ringing app.
+    public func refreshBackstops(for alarm: Alarm) async {
+        let now = Date()
+        await systemBackend?.refreshBackstops(for: alarm, now: now)
+        lastBackstopArmAt = now
+    }
+
+    /// Stands the follow-up chain down. Refuses unless the event is one that
+    /// `BackstopPolicy` allows — nothing but verified completion may end it.
+    public func standDownBackstops(alarmID: UUID, on event: BackstopPolicy.Event) {
+        guard BackstopPolicy.mayStandDown(on: event) else {
+            log.error("Refused to stand down backstops on \(event.rawValue, privacy: .public)")
+            return
+        }
         systemBackend?.cancelBackstops(alarmID: alarmID)
+        lastBackstopArmAt = nil
     }
 
     public func cancelSnooze(alarmID: UUID) async {
@@ -168,6 +218,18 @@ public final class AlarmCoordinator: ObservableObject {
 
     public func cancelWakeUpCheck(alarmID: UUID) async {
         await notifications.cancelWakeUpCheck(alarmID: alarmID)
+    }
+
+    // MARK: Still-ringing nags
+
+    /// Schedules the "Alarm still ringing — finish your mission" reminders
+    /// that land seconds after the user leaves a ringing app.
+    public func scheduleStillRingingNag(for alarm: Alarm, occurrence: Date) async {
+        await notifications.scheduleStillRingingNag(alarm: alarm, occurrence: occurrence, from: Date())
+    }
+
+    public func cancelStillRingingNag(alarmID: UUID) async {
+        await notifications.cancelStillRingingNag(alarmID: alarmID)
     }
 
     public func cancelEverything() async {

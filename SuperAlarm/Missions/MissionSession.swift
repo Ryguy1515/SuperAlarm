@@ -21,14 +21,23 @@ public final class MissionSession: ObservableObject {
     public var onComplete: (() -> Void)?
     /// Raised when a configured time limit expires.
     public var onTimeout: (() -> Void)?
+    /// Raised after every passed round with the new total, so the runtime
+    /// can persist progress for a relaunch.
+    public var onProgress: ((Int) -> Void)?
 
     private var timer: Timer?
 
-    public init(settings: MissionSettings, now: Date = Date()) {
+    /// - Parameters:
+    ///   - now: when the mission started. Pass the original start when
+    ///     resuming after a relaunch so elapsed time and step counts carry on.
+    ///   - completedRounds: rounds already passed before a relaunch.
+    public init(settings: MissionSettings, now: Date = Date(), completedRounds: Int = 0) {
         self.settings = settings
         self.startedAt = now
+        self.completedRounds = max(0, min(completedRounds, max(1, settings.rounds)))
         if settings.timeLimitSeconds > 0 {
-            secondsRemaining = settings.timeLimitSeconds
+            let elapsed = Int(Date().timeIntervalSince(now))
+            secondsRemaining = max(0, settings.timeLimitSeconds - max(0, elapsed))
         }
     }
 
@@ -86,6 +95,7 @@ public final class MissionSession: ObservableObject {
         guard !isComplete else { return }
         completedRounds += 1
         HapticEngine.shared.success()
+        onProgress?(completedRounds)
 
         if completedRounds >= totalRounds {
             isComplete = true
