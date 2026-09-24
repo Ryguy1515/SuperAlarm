@@ -36,6 +36,10 @@ struct SuperAlarmApp: App {
 
         HapticEngine.shared.uiFeedbackEnabled = store.settings.hapticFeedback
 
+        // The hidden volume slider is vended asynchronously after joining a
+        // window; attaching it now means it is ready long before any alarm.
+        SystemVolume.shared.prepare()
+
         runtime.bootstrap(store: store)
 
         await coordinator.refreshAuthorizationStatus()

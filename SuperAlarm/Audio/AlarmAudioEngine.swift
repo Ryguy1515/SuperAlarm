@@ -14,8 +14,9 @@ import UIKit
 /// 1. The `.playback` audio session category ignores the hardware ringer
 ///    switch, so the alarm sounds even with the phone on silent.
 /// 2. The hardware output volume is pushed up when the alarm starts, and held
-///    there — lowering it with the side buttons is undone within half a second
-///    while `lockVolume` is set.
+///    there — lowering it with the side buttons is observed through KVO on
+///    `AVAudioSession.outputVolume` and undone within a frame while
+///    `lockVolume` is set. A slow timer backs the observer up.
 /// 3. A near-silent looping file keeps the audio session (and therefore the
 ///    process) alive in the background between alarms, so the app is still
 ///    running when it is time to ring.
@@ -33,6 +34,7 @@ public final class AlarmAudioEngine: ObservableObject {
     // Timers ----------------------------------------------------------------
     private var rampTimer: Timer?
     private var volumeLockTimer: Timer?
+    private var volumeObservation: NSKeyValueObservation?
     private var previewStopWork: DispatchWorkItem?
 
     // State -----------------------------------------------------------------
@@ -43,9 +45,20 @@ public final class AlarmAudioEngine: ObservableObject {
     /// Volume the hardware was at before the alarm raised it, so it can be
     /// put back afterwards.
     private var restoreSystemVolume: Float?
-    /// Level the volume lock enforces.
-    private var lockedVolumeTarget: Float = 1.0
+    /// Level the volume lock enforces right now. Follows the gradual ramp.
+    private var lockPolicy = VolumeLockPolicy(target: 1.0)
+    /// Where the lock ends up once any ramp completes.
+    private var lockEndTarget: Float = 1.0
+    /// Hardware volume when the alarm started, the ramp's starting point.
+    private var lockStartLevel: Float = 1.0
     private var lockVolume = false
+    /// Times the lock has had to push the volume back up during this ring.
+    /// Published so the ring screen can show the lock doing its job — the
+    /// hidden volume view suppresses the system volume HUD, so the app has to
+    /// provide that feedback itself.
+    @Published public private(set) var volumeRestoreCount = 0
+    /// True while the lock is armed on a ringing alarm.
+    @Published public private(set) var isVolumeLocked = false
     /// Target app-level gain once any ramp completes.
     private var targetGain: Float = 1.0
     /// Progress through the gradual-volume ramp.
@@ -114,9 +127,12 @@ public final class AlarmAudioEngine: ObservableObject {
         }
 
         targetGain = Float(max(0, min(1, settings.volume)))
-        lockedVolumeTarget = settings.overrideSystemVolume ? 1.0 : SystemVolume.shared.current
         lockVolume = shouldLock
+        volumeRestoreCount = 0
 
+        // The player's own gain is independent of the hardware level: it
+        // ends at `targetGain` regardless of what the side buttons do, so the
+        // floor is as loud as the OS permits.
         do {
             let player = try AVAudioPlayer(contentsOf: url)
             player.numberOfLoops = -1
@@ -128,12 +144,24 @@ public final class AlarmAudioEngine: ObservableObject {
             log.error("Failed to start alarm audio: \(String(describing: error), privacy: .public)")
         }
 
-        if settings.overrideSystemVolume {
-            if settings.gradualIncrease {
-                SystemVolume.shared.ramp(to: 1.0, over: min(settings.gradualRampSeconds, 30))
-            } else {
-                SystemVolume.shared.set(1.0)
-            }
+        // Hardware level. With "override device volume" the end target is
+        // full; otherwise the current level is held (never below the floor).
+        lockStartLevel = SystemVolume.shared.current
+        lockEndTarget = VolumeLockPolicy.initialTarget(
+            overridesSystemVolume: settings.overrideSystemVolume,
+            current: lockStartLevel
+        )
+
+        if settings.gradualIncrease, settings.overrideSystemVolume {
+            // The ramp moves the lock target up with it, so the hardware
+            // volume rises smoothly and the lock defends the current step
+            // rather than snapping straight to full.
+            lockPolicy = VolumeLockPolicy(target: max(lockStartLevel, VolumeLockPolicy.floor))
+        } else {
+            lockPolicy = VolumeLockPolicy(target: lockEndTarget)
+        }
+        if settings.overrideSystemVolume || lockPolicy.shouldRestore(observed: lockStartLevel) {
+            SystemVolume.shared.set(lockPolicy.target)
         }
 
         if settings.gradualIncrease {
@@ -246,8 +274,13 @@ public final class AlarmAudioEngine: ObservableObject {
                 let progress = Float(self.rampStep) / Float(steps)
                 let eased = progress * progress
                 player.volume = min(target, 0.05 + (target - 0.05) * eased)
+                // The hardware target follows, capped at 30 s so a long
+                // player ramp does not leave the phone quiet for minutes.
+                let hardwareProgress = min(1, Double(self.rampStep) * tick / min(duration, 30))
+                self.advanceLockTarget(progress: hardwareProgress * hardwareProgress)
                 if self.rampStep >= steps {
                     player.volume = target
+                    self.advanceLockTarget(progress: 1)
                     timer.invalidate()
                     self.rampTimer = nil
                 }
@@ -257,26 +290,59 @@ public final class AlarmAudioEngine: ObservableObject {
         rampTimer = timer
     }
 
+    /// Moves the hardware target along with the gradual ramp.
+    private func advanceLockTarget(progress: Double) {
+        guard lockEndTarget > lockPolicy.target else { return }
+        let ramped = VolumeLockPolicy.rampedTarget(start: lockStartLevel, end: lockEndTarget, progress: progress)
+        let next = max(lockPolicy.target, ramped)
+        guard next > lockPolicy.target + 0.005 else { return }
+        lockPolicy.target = next
+        SystemVolume.shared.set(next)
+    }
+
     /// Restores the output volume whenever it is lowered while ringing, which
     /// neutralises the side buttons as an escape hatch.
+    ///
+    /// Two mechanisms: KVO on `outputVolume` reacts to a button press within a
+    /// frame, and a one-second timer catches anything the observer misses
+    /// (route changes, the observer being torn down by a media-services
+    /// reset, a write that was silently ignored).
     private func startVolumeLock() {
         stopVolumeLock()
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        lockVolume = true
+        isVolumeLocked = true
+
+        volumeObservation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] session, change in
+            let observed = change.newValue ?? session.outputVolume
+            Task { @MainActor in self?.enforceVolumeLock(observed: observed, reason: "button") }
+        }
+
+        let timer = Timer(timeInterval: VolumeLockPolicy.safetyNetInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.lockVolume, self.isRinging else { return }
-                if SystemVolume.shared.current < self.lockedVolumeTarget - 0.02 {
-                    SystemVolume.shared.set(self.lockedVolumeTarget)
-                }
+                guard let self else { return }
+                self.enforceVolumeLock(observed: SystemVolume.shared.current, reason: "timer")
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         volumeLockTimer = timer
     }
 
+    private func enforceVolumeLock(observed: Float, reason: String) {
+        guard lockVolume, isRinging else { return }
+        guard lockPolicy.shouldRestore(observed: observed) else { return }
+        volumeRestoreCount += 1
+        let restored = SystemVolume.shared.set(lockPolicy.target)
+        let target = lockPolicy.target
+        log.info("Volume lock (\(reason, privacy: .public)): \(observed, privacy: .public) back to \(target, privacy: .public); slider \(restored ? "ok" : "missing", privacy: .public)")
+    }
+
     private func stopVolumeLock() {
+        volumeObservation?.invalidate()
+        volumeObservation = nil
         volumeLockTimer?.invalidate()
         volumeLockTimer = nil
         lockVolume = false
+        isVolumeLocked = false
     }
 
     // MARK: - Background keep-alive
@@ -447,6 +513,9 @@ public final class AlarmAudioEngine: ObservableObject {
 
         if wasRinging {
             // The ring coordinator owns the tone choice; ask it to restart.
+            // The lock's observer died with the session and is re-armed by
+            // the restart.
+            stopVolumeLock()
             NotificationCenter.default.post(name: .alarmAudioNeedsRestart, object: nil)
         } else if wasKeepAlive {
             startKeepAlive()
