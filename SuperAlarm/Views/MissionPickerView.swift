@@ -153,6 +153,7 @@ struct MissionConfigView: View {
                         warningCard(biometricWarning)
                     }
 
+                    if type == .pushup || type == .squat { detectionCard }
                     if type.supportsGoalCount { goalCard }
                     if type.supportsDifficulty { difficultyCard }
                     if type.supportsRounds { roundsCard }
@@ -252,6 +253,27 @@ struct MissionConfigView: View {
                 Text(text)
                     .font(SAFont.body(14))
                     .foregroundStyle(SAColor.textPrimary)
+            }
+        }
+    }
+
+    private var detectionCard: some View {
+        SACard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("How reps are counted")
+                    .font(SAFont.headline(17))
+                    .foregroundStyle(SAColor.textPrimary)
+
+                Picker("Detection", selection: $draft.repDetection) {
+                    ForEach(RepDetection.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(draft.repDetection.detail)
+                    .font(SAFont.body(13))
+                    .foregroundStyle(SAColor.textSecondary)
             }
         }
     }

@@ -137,6 +137,10 @@ struct MissionRunnerView: View {
             MemoryMissionView(session: session)
         case .typing:
             TypingMissionView(session: session)
+        case .pushup where settings.repDetection == .camera:
+            PoseRepMissionView(session: session, exercise: .pushup)
+        case .squat where settings.repDetection == .camera:
+            PoseRepMissionView(session: session, exercise: .squat)
         case .walk, .shake, .pushup, .squat:
             MotionMissionView(session: session)
         case .barcode:

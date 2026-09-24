@@ -45,6 +45,14 @@ public class CaptureController: NSObject, ObservableObject {
     /// configuration transaction.
     func configureOutputs() {}
 
+    /// Which camera to open. Scanning missions point away from you; pose
+    /// missions point at you.
+    var cameraPosition: AVCaptureDevice.Position { .back }
+
+    /// Capture preset. Pose detection pins this so the overlay knows the
+    /// frame's aspect ratio without having to query it.
+    var preset: AVCaptureSession.Preset { .high }
+
     /// Configuration happens on the main actor — it is a one-off and touches
     /// `@Published` state — while `startRunning()` is dispatched off it,
     /// because that call blocks.
@@ -82,10 +90,10 @@ public class CaptureController: NSObject, ObservableObject {
     /// `errorMessage` set for the caller to surface.
     private func configureSession() -> Bool {
         session.beginConfiguration()
-        session.sessionPreset = .high
+        session.sessionPreset = preset
 
         guard
-            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition)
                 ?? AVCaptureDevice.default(for: .video),
             let input = try? AVCaptureDeviceInput(device: device),
             session.canAddInput(input)

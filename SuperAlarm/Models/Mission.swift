@@ -61,7 +61,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .none: return "Turn the alarm off with a single slide."
         case .math: return "Solve arithmetic to shake off the fog."
-        case .pushup: return "Do real push-ups. The phone counts them."
+        case .pushup: return "Prop the phone up. The camera counts your reps."
         case .walk: return "Get out of bed and take some steps."
         case .faceID: return "Scan your face to prove you sat up."
         case .objectScan: return "Photograph a registered object across the room."
@@ -81,7 +81,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .math:
             return "Solve a set of arithmetic problems. Harder difficulties use larger numbers and more operations, which forces genuine mental effort rather than muscle memory."
         case .pushup:
-            return "Hold the phone to your chest, or put it in a chest pocket or armband — anywhere it rises and falls with your torso. Motion sensors count the movement of the phone itself, so it has to travel with you. Half-reps do not register."
+            return "Prop the phone up facing you and the camera counts your reps on screen, tracking your shoulder, elbow and wrist. Half-reps do not register. You can switch to motion sensors instead if you would rather pocket the phone."
         case .walk:
             return "The step counter runs until you hit your goal. Leaving the bed is the entire point, so pick a number that gets you out of the room."
         case .faceID:
@@ -95,7 +95,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .memory:
             return "A pattern of tiles lights up. Reproduce it from memory. Larger grids and longer sequences make this genuinely demanding."
         case .squat:
-            return "Keep the phone in a pocket or hold it to your chest. Motion sensors count full squats — depth matters."
+            return "Prop the phone up facing you and the camera counts your reps on screen, tracking your hip, knee and ankle. Depth matters — shallow squats do not register."
         case .typing:
             return "Type the phrase exactly, including punctuation. Typos reset the current phrase."
         }
@@ -284,6 +284,36 @@ public enum MathOperator: String, Codable, Sendable {
     }
 }
 
+// MARK: - Rep detection
+
+/// How push-up and squat repetitions are counted.
+public enum RepDetection: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// Front camera plus on-device body-pose detection. Prop the phone up and
+    /// it watches your joints.
+    case camera
+    /// Accelerometer only. Needs the phone to move with your body, so it has
+    /// to be held or pocketed.
+    case motion
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .camera: return "Camera"
+        case .motion: return "Motion sensors"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .camera:
+            return "Prop the phone up facing you. It tracks your joints and counts reps on screen — nothing to hold or wear."
+        case .motion:
+            return "Counts movement of the phone itself, so it must travel with your body. Works in the dark, but you have to hold or pocket it."
+        }
+    }
+}
+
 // MARK: - Mission settings
 
 public struct MissionSettings: Codable, Hashable, Sendable {
@@ -293,6 +323,8 @@ public struct MissionSettings: Codable, Hashable, Sendable {
     public var rounds: Int = 1
     /// Numeric target for counting missions (steps, shakes, reps).
     public var goal: Int = 0
+    /// Only consulted for push-ups and squats.
+    public var repDetection: RepDetection = .camera
     /// Abandon the mission and re-ring after this many seconds. 0 disables.
     public var timeLimitSeconds: Int = 0
     /// Offer the give-up escape hatch once the mission has been fought with
@@ -325,6 +357,7 @@ public struct MissionSettings: Codable, Hashable, Sendable {
         difficulty = c.decodeOr(.difficulty, MissionDifficulty.normal)
         rounds = max(1, c.decodeOr(.rounds, 1))
         goal = c.decodeOr(.goal, 0)
+        repDetection = c.decodeOr(.repDetection, RepDetection.camera)
         timeLimitSeconds = c.decodeOr(.timeLimitSeconds, 0)
         escapeHatchAfterSeconds = c.decodeOr(.escapeHatchAfterSeconds, 120)
         barcodePayload = try? c.decodeIfPresent(String.self, forKey: .barcodePayload)
