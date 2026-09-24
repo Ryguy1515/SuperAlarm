@@ -5,10 +5,15 @@ import os.log
 /// Bridges the notification system into the runtime and keeps the app's state
 /// safe across suspension.
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    var runtime: AlarmRuntime?
+    /// Set by the app once the runtime exists. A notification tapped on a
+    /// cold launch arrives before that, so responses are queued until then.
+    var runtime: AlarmRuntime? {
+        didSet { replayQueuedResponses() }
+    }
     var store: AlarmStore?
 
     private let log = Logger(subsystem: "io.superalarm", category: "appdelegate")
+    private var queuedResponses: [(action: String, payload: Payload)] = []
 
     func application(
         _ application: UIApplication,
@@ -70,30 +75,54 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didReceive response: UNNotificationResponse
     ) async {
         let info = Payload(response.notification.request.content.userInfo)
+        let action = response.actionIdentifier
 
         await MainActor.run {
-            switch response.actionIdentifier {
-            case AlarmNotification.actionSnooze:
-                handle(payload: info)
-                runtime?.snooze()
+            process(action: action, payload: info)
+        }
+    }
 
-            case AlarmNotification.actionImUp:
-                handle(payload: info)
-                runtime?.confirmAwake()
+    @MainActor
+    private func process(action: String, payload: Payload) {
+        guard runtime != nil else {
+            // Cold launch: the runtime is created a moment later; replay then.
+            queuedResponses.append((action, payload))
+            return
+        }
 
-            case AlarmNotification.actionStop, UNNotificationDefaultActionIdentifier:
-                // Opening the app puts the ring screen on screen, where the
-                // mission (if any) must still be completed.
-                handle(payload: info)
+        switch action {
+        case AlarmNotification.actionSnooze:
+            handle(payload: payload)
+            // Snoozing from a banner is only honoured on the ring screen;
+            // from inside a mission it would be a way round the mission.
+            runtime?.snooze()
 
-            case UNNotificationDismissActionIdentifier:
-                // Swiping a chain link away must not count as turning the
-                // alarm off — the rest of the chain keeps going.
-                break
+        case AlarmNotification.actionImUp:
+            handle(payload: payload)
+            runtime?.confirmAwake()
 
-            default:
-                handle(payload: info)
-            }
+        case AlarmNotification.actionStop, UNNotificationDefaultActionIdentifier:
+            // Opening the app puts the ring screen on screen, where the
+            // mission (if any) must still be completed.
+            handle(payload: payload)
+
+        case UNNotificationDismissActionIdentifier:
+            // Swiping a chain link away must not count as turning the
+            // alarm off — the rest of the chain keeps going.
+            break
+
+        default:
+            handle(payload: payload)
+        }
+    }
+
+    @MainActor
+    private func replayQueuedResponses() {
+        guard runtime != nil, !queuedResponses.isEmpty else { return }
+        let pending = queuedResponses
+        queuedResponses.removeAll()
+        for entry in pending {
+            process(action: entry.action, payload: entry.payload)
         }
     }
 
@@ -106,9 +135,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         case .bedtime, .preAlarm:
             return
         case .alarm, .snooze, .safetyNet, .wakeCheck:
+            // Safety-net payloads carry no fire date; the runtime resolves
+            // the occurrence from the schedule so it is recorded correctly.
             runtime.handleNotification(
                 alarmID: alarmID,
-                occurrence: payload.fireDate ?? Date(),
+                occurrence: payload.fireDate,
                 kind: kind
             )
         }

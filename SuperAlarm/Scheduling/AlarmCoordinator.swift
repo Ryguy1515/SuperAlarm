@@ -21,6 +21,9 @@ public protocol SystemAlarmBackend: AnyObject {
     /// Removes everything for one alarm — deletion, not dismissal.
     func cancel(alarmID: UUID) async
     func scheduleSnooze(alarm: Alarm, at date: Date) async
+    /// Removes the snooze / wake-check re-ring alarm scheduled by
+    /// `scheduleSnooze`, without touching the follow-up chain.
+    func cancelSnooze(alarmID: UUID) async
     func cancelAll() async
 
     /// Arms the live follow-up chain from `base`. Necessary because a
@@ -30,7 +33,7 @@ public protocol SystemAlarmBackend: AnyObject {
     /// Rolls the live chain forward while the app is alive and ringing.
     func refreshBackstops(for alarm: Alarm, now: Date) async
     /// Stands the follow-up chain down once the mission is verified complete.
-    func cancelBackstops(alarmID: UUID)
+    func cancelBackstops(alarmID: UUID) async
     /// Stops whatever is alerting for this alarm right now, leaving anything
     /// scheduled for later untouched.
     func stopAlerting(alarmID: UUID)
@@ -41,7 +44,8 @@ public protocol SystemAlarmBackend: AnyObject {
 public extension SystemAlarmBackend {
     func scheduleBackstops(for alarm: Alarm, from base: Date) async {}
     func refreshBackstops(for alarm: Alarm, now: Date) async {}
-    func cancelBackstops(alarmID: UUID) {}
+    func cancelBackstops(alarmID: UUID) async {}
+    func cancelSnooze(alarmID: UUID) async {}
     func stopAlerting(alarmID: UUID) {}
     var diagnosticSummary: String { "Unavailable" }
 }
@@ -71,9 +75,25 @@ public final class AlarmCoordinator: ObservableObject {
     @Published public private(set) var lastBackstopArmAt: Date?
 
     private var rebuildTask: Task<Void, Never>?
+    /// Every mutation of the system alarms and notification chains runs
+    /// through this one chain of tasks. Arming a chain is read-schedule-
+    /// cancel-store with awaits in the middle; two of them interleaving
+    /// orphan a set of system alarms that nothing can cancel afterwards.
+    private var pipeline: Task<Void, Never>?
 
     private init() {
         systemBackend = SystemAlarmBackendFactory.make()
+    }
+
+    /// Runs `operation` after every previously enqueued operation finishes.
+    private func serialized(_ operation: @escaping @MainActor () async -> Void) async {
+        let previous = pipeline
+        let task = Task { @MainActor in
+            await previous?.value
+            await operation()
+        }
+        pipeline = task
+        await task.value
     }
 
     /// True when a real system-level alarm is doing the work, which is what
@@ -136,25 +156,27 @@ public final class AlarmCoordinator: ObservableObject {
     }
 
     private func performRebuild(alarms: [Alarm], settings: AppSettings) async {
-        // With system alarms active the chain is the re-summon layer: it is
-        // kept, but offset past the first alert so the two never stack. The
-        // user can still switch it off.
-        let chainsEnabled = !usesSystemAlarms || settings.redundantNotificationBackup
-        let chainOffset = usesSystemAlarms ? BackstopPolicy.chainOffsetWithSystemAlarms : 0
-        await notifications.rebuild(
-            alarms: alarms,
-            settings: settings,
-            chainsEnabled: chainsEnabled,
-            chainOffset: chainOffset
-        )
+        await serialized { [self] in
+            // With system alarms active the chain is the re-summon layer: it
+            // is kept, but offset past the first alert so the two never
+            // stack. The user can still switch it off.
+            let chainsEnabled = !usesSystemAlarms || settings.redundantNotificationBackup
+            let chainOffset = usesSystemAlarms ? BackstopPolicy.chainOffsetWithSystemAlarms : 0
+            await notifications.rebuild(
+                alarms: alarms,
+                settings: settings,
+                chainsEnabled: chainsEnabled,
+                chainOffset: chainOffset
+            )
 
-        if let backend = systemBackend, backend.isSupported {
-            await backend.sync(alarms: alarms.filter(\.isEnabled))
+            if let backend = systemBackend, backend.isSupported {
+                await backend.sync(alarms: alarms.filter(\.isEnabled))
+            }
+
+            lastRebuildAt = Date()
+            pendingNotificationCount = await notifications.pendingCount()
+            log.info("Rebuild complete for \(alarms.filter(\.isEnabled).count, privacy: .public) enabled alarms")
         }
-
-        lastRebuildAt = Date()
-        pendingNotificationCount = await notifications.pendingCount()
-        log.info("Rebuild complete for \(alarms.filter(\.isEnabled).count, privacy: .public) enabled alarms")
     }
 
     // MARK: Per-alarm operations
@@ -180,36 +202,65 @@ public final class AlarmCoordinator: ObservableObject {
     }
 
     public func scheduleSnooze(alarm: Alarm, at date: Date) async {
-        await notifications.scheduleSnooze(alarm: alarm, fireAt: date)
-        await systemBackend?.scheduleSnooze(alarm: alarm, at: date)
+        await serialized { [self] in
+            await notifications.scheduleSnooze(alarm: alarm, fireAt: date)
+            await systemBackend?.scheduleSnooze(alarm: alarm, at: date)
+        }
     }
 
-    /// Arms the live follow-up chain when an alarm starts ringing.
-    public func armBackstops(for alarm: Alarm) async {
-        await systemBackend?.scheduleBackstops(for: alarm, from: Date())
+    /// Arms the live follow-up chain when an alarm starts ringing: AlarmKit
+    /// backstops when system alarms are active, an audible notification
+    /// chain otherwise. The timestamp is set before the awaits so the
+    /// heartbeat does not start a second arm while this one is in flight.
+    public func armBackstops(for alarm: Alarm, occurrence: Date) async {
         lastBackstopArmAt = Date()
+        await serialized { [self] in
+            if usesSystemAlarms {
+                await systemBackend?.scheduleBackstops(for: alarm, from: Date())
+            } else {
+                await notifications.scheduleLiveChain(alarm: alarm, occurrence: occurrence, from: Date())
+            }
+        }
     }
 
     /// Keeps the live chain ahead of a ringing app.
-    public func refreshBackstops(for alarm: Alarm) async {
+    public func refreshBackstops(for alarm: Alarm, occurrence: Date) async {
         let now = Date()
-        await systemBackend?.refreshBackstops(for: alarm, now: now)
         lastBackstopArmAt = now
+        await serialized { [self] in
+            if usesSystemAlarms {
+                await systemBackend?.refreshBackstops(for: alarm, now: now)
+            } else {
+                await notifications.scheduleLiveChain(alarm: alarm, occurrence: occurrence, from: Date())
+            }
+        }
     }
 
     /// Stands the follow-up chain down. Refuses unless the event is one that
     /// `BackstopPolicy` allows — nothing but verified completion may end it.
+    /// Queued behind any arm in flight, so a chain being armed right now is
+    /// cancelled too rather than orphaned.
     public func standDownBackstops(alarmID: UUID, on event: BackstopPolicy.Event) {
         guard BackstopPolicy.mayStandDown(on: event) else {
             log.error("Refused to stand down backstops on \(event.rawValue, privacy: .public)")
             return
         }
-        systemBackend?.cancelBackstops(alarmID: alarmID)
         lastBackstopArmAt = nil
+        Task {
+            await serialized { [self] in
+                await systemBackend?.cancelBackstops(alarmID: alarmID)
+                await systemBackend?.cancelSnooze(alarmID: alarmID)
+                await notifications.cancelLiveChain(alarmID: alarmID)
+            }
+        }
     }
 
+    /// Cancels the snooze / wake-check re-ring on both backends.
     public func cancelSnooze(alarmID: UUID) async {
-        await notifications.cancelSnooze(alarmID: alarmID)
+        await serialized { [self] in
+            await notifications.cancelSnooze(alarmID: alarmID)
+            await systemBackend?.cancelSnooze(alarmID: alarmID)
+        }
     }
 
     public func scheduleWakeUpCheck(alarm: Alarm, at date: Date) async {

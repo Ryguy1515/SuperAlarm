@@ -37,6 +37,9 @@ public enum AlarmNotification {
     static let prefixWakeCheck = "wake"
     /// "Alarm still ringing" reminders armed when the user leaves the app.
     static let prefixNag = "nag"
+    /// The audible follow-up chain armed from "now" while the app rings —
+    /// the notification layer's equivalent of AlarmKit backstops.
+    static let prefixLive = "live"
     static let bedtimeIdentifier = "bedtime"
 
     /// Prefixes owned by `rebuild` and therefore safe to clear on each pass.
@@ -186,6 +189,10 @@ public final class NotificationScheduler: @unchecked Sendable {
         }
 
         guard chainsEnabled else {
+            // Even with the chain switched off, the safety nets stay: they
+            // are what still fires if the system alarm permission is revoked
+            // or an OS update forgets the system alarms.
+            _ = await scheduleSafetyNets(for: enabled, budget: 24)
             _ = await schedulePreAlarms(for: enabled, budget: 6)
             await scheduleBedtimeReminder(settings: settings)
             log.info("System alarms active — notification chains suppressed")
@@ -358,9 +365,13 @@ public final class NotificationScheduler: @unchecked Sendable {
                 let fireDate = occurrence.date.addingTimeInterval(offset + chainSpacing * Double(index))
                 let content = UNMutableNotificationContent()
                 content.title = index == 0 && offset == 0 ? alarm.displayLabel : "\(alarm.displayLabel) — still ringing"
-                content.body = index == 0 && offset == 0
-                    ? (alarm.memo.isEmpty ? "Tap to turn off the alarm." : alarm.memo)
-                    : "Open SuperAlarm and finish the mission to turn it off."
+                if index == 0 && offset == 0 {
+                    content.body = alarm.memo.isEmpty ? "Tap to turn off the alarm." : alarm.memo
+                } else if alarm.mission.type == .none {
+                    content.body = "Open SuperAlarm to turn it off."
+                } else {
+                    content.body = "Open SuperAlarm and finish your \(alarm.mission.type.sentenceNoun) mission to turn it off."
+                }
                 content.categoryIdentifier = AlarmNotification.categoryAlarm
                 content.interruptionLevel = .timeSensitive
                 content.sound = UNNotificationSound(
@@ -467,6 +478,50 @@ public final class NotificationScheduler: @unchecked Sendable {
         await removePending(withPrefix: AlarmNotification.prefixWakeCheck, alarmID: alarmID)
     }
 
+    // MARK: Live chain
+
+    /// The audible follow-up chain for the notification backend, armed from
+    /// `base` the moment the app rings and rolled forward while it keeps
+    /// ringing. Not owned by `rebuild`, so a schedule rebuild mid-ring cannot
+    /// remove it; only a verified completion does.
+    public func scheduleLiveChain(alarm: Alarm, occurrence: Date, from base: Date) async {
+        await cancelLiveChain(alarmID: alarm.id)
+
+        for (index, fireDate) in BackstopPolicy.dates(from: base, offsets: BackstopPolicy.liveOffsets).enumerated() {
+            let content = UNMutableNotificationContent()
+            content.title = "\(alarm.displayLabel) — still ringing"
+            content.body = alarm.mission.type == .none
+                ? "Open SuperAlarm to turn it off."
+                : "Open SuperAlarm and finish your \(alarm.mission.type.sentenceNoun) mission to turn it off."
+            content.categoryIdentifier = AlarmNotification.categoryAlarm
+            content.interruptionLevel = .timeSensitive
+            content.relevanceScore = 1.0
+            content.sound = UNNotificationSound(
+                named: UNNotificationSoundName(ToneResolver.bundledTone(for: alarm.sound.toneID).fileName)
+            )
+            content.userInfo = [
+                AlarmNotification.keyAlarmID: alarm.id.uuidString,
+                AlarmNotification.keyKind: AlarmNotification.Kind.alarm.rawValue,
+                AlarmNotification.keyFireDate: occurrence.timeIntervalSince1970,
+                AlarmNotification.keyChainIndex: index,
+            ]
+
+            let request = UNNotificationRequest(
+                identifier: AlarmNotification.identifier(AlarmNotification.prefixLive, alarm.id, base, index),
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(
+                    timeInterval: max(1, fireDate.timeIntervalSince(base)),
+                    repeats: false
+                )
+            )
+            _ = await submit(request)
+        }
+    }
+
+    public func cancelLiveChain(alarmID: UUID) async {
+        await removePending(withPrefix: AlarmNotification.prefixLive, alarmID: alarmID)
+    }
+
     // MARK: Still-ringing nags
 
     /// Reminders that land seconds after the user leaves a ringing app and
@@ -482,7 +537,7 @@ public final class NotificationScheduler: @unchecked Sendable {
             content.title = "Alarm still ringing"
             content.body = alarm.mission.type == .none
                 ? "Come back to SuperAlarm to turn it off."
-                : "Finish your \(alarm.mission.type.displayName) mission to turn it off."
+                : "Finish your \(alarm.mission.type.sentenceNoun) mission to turn it off."
             content.categoryIdentifier = AlarmNotification.categoryAlarm
             content.interruptionLevel = .timeSensitive
             content.relevanceScore = 1.0

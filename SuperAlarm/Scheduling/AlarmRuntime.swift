@@ -32,6 +32,117 @@ struct PersistedRingState: Codable {
     var missionCompletedRounds: Int?
     var accumulatedMissionSeconds: Double?
     var missionFailures: Int?
+
+    init(
+        alarmID: UUID,
+        occurrenceDate: Date,
+        firedAt: Date,
+        snoozeCount: Int,
+        phase: AlarmRuntime.Phase,
+        snoozeEndsAt: Date? = nil,
+        wakeCheckFireAt: Date? = nil,
+        wakeCheckDeadline: Date? = nil,
+        recordID: UUID? = nil,
+        playedToneID: String? = nil,
+        handledOccurrences: [String: Date] = [:],
+        missionIntent: String? = nil,
+        missionStartedAt: Date? = nil,
+        missionCompletedRounds: Int? = nil,
+        accumulatedMissionSeconds: Double? = nil,
+        missionFailures: Int? = nil
+    ) {
+        self.alarmID = alarmID
+        self.occurrenceDate = occurrenceDate
+        self.firedAt = firedAt
+        self.snoozeCount = snoozeCount
+        self.phase = phase
+        self.snoozeEndsAt = snoozeEndsAt
+        self.wakeCheckFireAt = wakeCheckFireAt
+        self.wakeCheckDeadline = wakeCheckDeadline
+        self.recordID = recordID
+        self.playedToneID = playedToneID
+        self.handledOccurrences = handledOccurrences
+        self.missionIntent = missionIntent
+        self.missionStartedAt = missionStartedAt
+        self.missionCompletedRounds = missionCompletedRounds
+        self.accumulatedMissionSeconds = accumulatedMissionSeconds
+        self.missionFailures = missionFailures
+    }
+
+    /// Hand-written so a state file from an older or newer build still
+    /// resumes: every field but the identity of the ring is optional, and an
+    /// unknown phase is treated as ringing — the safe default for an alarm
+    /// that had not been dealt with.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        alarmID = try c.decode(UUID.self, forKey: .alarmID)
+        occurrenceDate = try c.decode(Date.self, forKey: .occurrenceDate)
+        firedAt = c.decodeOr(.firedAt, occurrenceDate)
+        snoozeCount = c.decodeOr(.snoozeCount, 0)
+        phase = (try? c.decodeIfPresent(String.self, forKey: .phase))
+            .flatMap { AlarmRuntime.Phase(rawValue: $0) } ?? .ringing
+        snoozeEndsAt = try? c.decodeIfPresent(Date.self, forKey: .snoozeEndsAt)
+        wakeCheckFireAt = try? c.decodeIfPresent(Date.self, forKey: .wakeCheckFireAt)
+        wakeCheckDeadline = try? c.decodeIfPresent(Date.self, forKey: .wakeCheckDeadline)
+        recordID = try? c.decodeIfPresent(UUID.self, forKey: .recordID)
+        playedToneID = try? c.decodeIfPresent(String.self, forKey: .playedToneID)
+        handledOccurrences = c.decodeOr(.handledOccurrences, [:])
+        missionIntent = try? c.decodeIfPresent(String.self, forKey: .missionIntent)
+        missionStartedAt = try? c.decodeIfPresent(Date.self, forKey: .missionStartedAt)
+        missionCompletedRounds = try? c.decodeIfPresent(Int.self, forKey: .missionCompletedRounds)
+        accumulatedMissionSeconds = try? c.decodeIfPresent(Double.self, forKey: .accumulatedMissionSeconds)
+        missionFailures = try? c.decodeIfPresent(Int.self, forKey: .missionFailures)
+    }
+}
+
+// MARK: - Due-alarm decision
+
+/// What the idle ticker should do about one alarm — pure so the skip and
+/// already-fired rules can be tested.
+enum DueDecision: Equatable {
+    /// Nothing to do.
+    case none
+    /// The skipped occurrence has passed; clear the skip and move on.
+    case clearSkip(Date)
+    /// Ring for this occurrence.
+    case ring(Date)
+    /// Too late to ring; record it as missed.
+    case missed(Date)
+
+    static func make(
+        for alarm: Alarm,
+        reference: Date,
+        catchUpWindow: TimeInterval,
+        alreadyHandled: (Date) -> Bool,
+        calendar: Calendar = .current
+    ) -> DueDecision {
+        guard alarm.isEnabled else { return .none }
+
+        if alarm.skipNextOccurrence {
+            // With the skip applied the schedule hides the skipped occurrence;
+            // without it we can see whether that occurrence has passed.
+            var unskipped = alarm
+            unskipped.skipNextOccurrence = false
+            if alarm.mostRecentFireDate(before: reference, within: catchUpWindow, calendar: calendar) == nil,
+               let skipped = unskipped.mostRecentFireDate(before: reference, within: catchUpWindow, calendar: calendar) {
+                return .clearSkip(skipped)
+            }
+        }
+
+        guard let occurrence = alarm.mostRecentFireDate(before: reference, within: catchUpWindow, calendar: calendar) else {
+            return .none
+        }
+        // Dealt with by a previous process: the store remembers the last
+        // occurrence that fired even when the in-memory bookkeeping is gone.
+        if let last = alarm.lastFiredAt, last >= occurrence { return .none }
+        if alreadyHandled(occurrence) { return .none }
+
+        let age = reference.timeIntervalSince(occurrence)
+        let ringWindow = alarm.sound.autoStopMinutes > 0
+            ? Double(alarm.sound.autoStopMinutes) * 60
+            : catchUpWindow
+        return age <= ringWindow ? .ring(occurrence) : .missed(occurrence)
+    }
 }
 
 // MARK: - Runtime
@@ -111,6 +222,7 @@ public final class AlarmRuntime: ObservableObject {
 
     private var missionIntent: MissionIntent = .dismiss
     private var ticker: Timer?
+    private var observers: [NSObjectProtocol] = []
     private var currentRecord: WakeRecord?
     private var handledOccurrences: [String: Date] = [:]
     private var wakeCheckFireAt: Date?
@@ -144,6 +256,13 @@ public final class AlarmRuntime: ObservableObject {
 
     public init() {}
 
+    deinit {
+        ticker?.invalidate()
+        for token in observers {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
     // MARK: - Lifecycle
 
     public func bootstrap(store: AlarmStore) {
@@ -164,8 +283,15 @@ public final class AlarmRuntime: ObservableObject {
     private func consumePendingMission() {
         guard let store, let alarmID = PendingMission.shared.consume() else { return }
         guard let alarm = store.alarm(with: alarmID) else { return }
-        // Already handling this one.
-        if phase != .idle, activeAlarm?.id == alarmID { return }
+        // Already handling this one — or a different one, which must not be
+        // clobbered mid-mission. The second alarm is picked up by the due
+        // check once this ring is over, within its catch-up window.
+        if phase != .idle {
+            if activeAlarm?.id != alarmID {
+                log.info("Ignoring hand-over for a second alarm while one is active")
+            }
+            return
+        }
 
         let occurrence = alarm.mostRecentFireDate(before: Date(), within: catchUpWindow) ?? Date()
         markHandled(alarmID: alarmID, date: occurrence)
@@ -187,23 +313,23 @@ public final class AlarmRuntime: ObservableObject {
 
     private func installObservers() {
         #if canImport(UIKit)
-        _ = NotificationCenter.default.addObserver(
+        observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.handleForeground() }
-        }
-        _ = NotificationCenter.default.addObserver(
+        })
+        observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.handleBackground() }
-        }
+        })
         #endif
 
-        _ = NotificationCenter.default.addObserver(
+        observers.append(NotificationCenter.default.addObserver(
             forName: .alarmAudioNeedsRestart, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.restartAudioIfRinging() }
-        }
+        })
     }
 
     public func handleForeground() {
@@ -246,10 +372,12 @@ public final class AlarmRuntime: ObservableObject {
     /// reminders, so leaving the app is answered within seconds.
     private func armDefencesForLeaving() {
         guard isAudiblePhase, let alarm = activeAlarm else { return }
+        // Resign-active and background arrive milliseconds apart; arm once.
+        guard !nagArmed else { return }
         let occurrence = occurrenceDate ?? Date()
         nagArmed = true
         Task {
-            await coordinator.refreshBackstops(for: alarm)
+            await coordinator.refreshBackstops(for: alarm, occurrence: occurrence)
             await coordinator.scheduleStillRingingNag(for: alarm, occurrence: occurrence)
         }
     }
@@ -333,7 +461,8 @@ public final class AlarmRuntime: ObservableObject {
     private func heartbeatBackstops(reference: Date) {
         guard isAudiblePhase, let alarm = activeAlarm else { return }
         guard BackstopPolicy.heartbeatIsDue(lastArmedAt: coordinator.lastBackstopArmAt, now: reference) else { return }
-        Task { await coordinator.refreshBackstops(for: alarm) }
+        let occurrence = occurrenceDate ?? Date()
+        Task { await coordinator.refreshBackstops(for: alarm, occurrence: occurrence) }
     }
 
     /// Stops an alarm that has been ringing unattended for its whole window.
@@ -350,23 +479,30 @@ public final class AlarmRuntime: ObservableObject {
 
     private func checkForDueAlarms(in store: AlarmStore, reference: Date) {
         for alarm in store.alarms where alarm.isEnabled {
-            guard let occurrence = alarm.mostRecentFireDate(before: reference, within: catchUpWindow) else {
+            let decision = DueDecision.make(
+                for: alarm,
+                reference: reference,
+                catchUpWindow: catchUpWindow,
+                alreadyHandled: { handledOccurrences[occurrenceKey(alarmID: alarm.id, date: $0)] != nil }
+            )
+
+            switch decision {
+            case .none:
                 continue
-            }
 
-            let key = occurrenceKey(alarmID: alarm.id, date: occurrence)
-            guard handledOccurrences[key] == nil else { continue }
+            case .clearSkip(let skipped):
+                // The occurrence the user asked to skip has passed; without
+                // this the skip would swallow every following occurrence too.
+                markHandled(alarmID: alarm.id, date: skipped)
+                store.setSkipNext(false, for: alarm.id)
+                log.info("Skipped occurrence passed for \(alarm.id.uuidString, privacy: .public)")
 
-            let age = reference.timeIntervalSince(occurrence)
-            let ringWindow = alarm.sound.autoStopMinutes > 0
-                ? Double(alarm.sound.autoStopMinutes) * 60
-                : catchUpWindow
-
-            if age <= ringWindow {
+            case .ring(let occurrence):
                 markHandled(alarmID: alarm.id, date: occurrence)
                 startRinging(alarm: alarm, occurrence: occurrence)
                 return
-            } else {
+
+            case .missed(let occurrence):
                 // Too late to be useful — log it so the history is honest.
                 markHandled(alarmID: alarm.id, date: occurrence)
                 var record = WakeRecord(
@@ -387,7 +523,7 @@ public final class AlarmRuntime: ObservableObject {
     // MARK: - Ringing
 
     /// Called by the notification delegate when the user taps an alarm alert.
-    public func handleNotification(alarmID: UUID, occurrence: Date, kind: AlarmNotification.Kind) {
+    public func handleNotification(alarmID: UUID, occurrence: Date?, kind: AlarmNotification.Kind) {
         guard let store, let alarm = store.alarm(with: alarmID) else { return }
 
         switch kind {
@@ -398,10 +534,17 @@ public final class AlarmRuntime: ObservableObject {
             }
 
         case .alarm, .snooze, .safetyNet:
-            // Already handling this exact occurrence.
-            if phase != .idle, activeAlarm?.id == alarmID { return }
-            markHandled(alarmID: alarmID, date: occurrence)
-            startRinging(alarm: alarm, occurrence: occurrence)
+            // Already handling this one, or a different alarm that must not
+            // be interrupted mid-mission.
+            if phase != .idle { return }
+            // A safety net carries no fire date; resolve it from the schedule
+            // so the history and the handled bookkeeping line up.
+            let resolved = occurrence
+                ?? alarm.mostRecentFireDate(before: Date(), within: catchUpWindow)
+                ?? Date()
+            if let last = alarm.lastFiredAt, last >= resolved { return }
+            markHandled(alarmID: alarmID, date: resolved)
+            startRinging(alarm: alarm, occurrence: resolved)
 
         case .preAlarm, .bedtime:
             break
@@ -410,7 +553,11 @@ public final class AlarmRuntime: ObservableObject {
 
     /// Immediately fires an alarm — used by the notification "Turn off" action
     /// and by the preview button in the editor.
-    public func startRinging(alarm: Alarm, occurrence: Date) {
+    ///
+    /// A preview rehearses the whole flow, defences included, but is not a
+    /// real occurrence: it does not switch a one-shot alarm off, stamp its
+    /// last-fired date, or write a wake record.
+    public func startRinging(alarm: Alarm, occurrence: Date, isPreview: Bool = false) {
         guard let store else { return }
 
         activeAlarm = alarm
@@ -421,23 +568,31 @@ public final class AlarmRuntime: ObservableObject {
         accumulatedMissionSeconds = 0
         phase = .ringing
 
-        var record = WakeRecord(
-            alarmID: alarm.id,
-            alarmLabel: alarm.displayLabel,
-            scheduledFor: occurrence,
-            firedAt: Date()
-        )
-        record.missionType = alarm.mission.type
-        currentRecord = record
+        if isPreview {
+            currentRecord = nil
+        } else {
+            var record = WakeRecord(
+                alarmID: alarm.id,
+                alarmLabel: alarm.displayLabel,
+                scheduledFor: occurrence,
+                firedAt: Date()
+            )
+            record.missionType = alarm.mission.type
+            currentRecord = record
+        }
 
-        store.markFired(id: alarm.id, at: occurrence)
-        beginAudio(for: alarm)
-        persistState()
-
+        // Defences first: the chain is armed before anything that could
+        // trigger a schedule rebuild.
         Task {
             await coordinator.cancelWakeUpCheck(alarmID: alarm.id)
             await takeOverFromSystem(alarm: alarm)
         }
+
+        if !isPreview {
+            store.markFired(id: alarm.id, at: occurrence, notify: false)
+        }
+        beginAudio(for: alarm)
+        persistState()
         log.info("Ringing alarm \(alarm.id.uuidString, privacy: .public)")
     }
 
@@ -446,11 +601,13 @@ public final class AlarmRuntime: ObservableObject {
     /// audio is already playing, and there must never be a moment where
     /// nothing owned by the system is about to ring.
     private func takeOverFromSystem(alarm: Alarm) async {
-        await coordinator.armBackstops(for: alarm)
+        await coordinator.armBackstops(for: alarm, occurrence: occurrenceDate ?? Date())
         coordinator.stopSystemAlert(alarmID: alarm.id)
     }
 
     private func beginAudio(for alarm: Alarm) {
+        // Bedtime ambience never plays under an alarm.
+        SleepSoundPlayer.shared.stop()
         let tone = ToneResolver.resolve(alarm.sound.toneID, lastPlayed: playingToneID)
         playingToneID = tone.id
         let shouldLock = store?.settings.lockVolumeWhileRinging ?? true
@@ -462,7 +619,7 @@ public final class AlarmRuntime: ObservableObject {
     }
 
     private func restartAudioIfRinging() {
-        guard phase == .ringing || phase == .wakeCheckRinging, let alarm = activeAlarm else { return }
+        guard isAudiblePhase, let alarm = activeAlarm else { return }
         beginAudio(for: alarm)
     }
 
@@ -482,12 +639,14 @@ public final class AlarmRuntime: ObservableObject {
 
     public func snooze() {
         guard let alarm = activeAlarm, canSnooze else { return }
+        // Only from the ring screen. A snooze action on a banner while the
+        // mission is on screen would be a way round the mission.
+        guard phase == .ringing else { return }
 
         // Snoozing can be made exactly as much work as getting up.
         if alarm.snooze.requireMissionToSnooze,
            alarm.mission.type != .none,
-           alarm.mission.isReady,
-           phase == .ringing {
+           alarm.mission.isReady {
             beginMission(intent: .snooze)
             return
         }
@@ -507,6 +666,7 @@ public final class AlarmRuntime: ObservableObject {
         phase = .snoozed
 
         audio.stopAlarm()
+        VoiceBriefing.shared.stop()
         persistState()
 
         Task {
@@ -523,12 +683,18 @@ public final class AlarmRuntime: ObservableObject {
         }
         snoozeEndsAt = nil
         phase = .ringing
-        firedAt = firedAt ?? Date()
+        // The auto-stop window starts again with every ring; measuring it
+        // from the original fire time would let three snoozes use it up and
+        // end the alarm as "rang out" with no mission done.
+        firedAt = Date()
         beginAudio(for: alarm)
         persistState()
         // The system snooze alarm fires at the same instant; the app's audio
         // takes over from it exactly as it does from the first alert.
-        Task { await takeOverFromSystem(alarm: alarm) }
+        Task {
+            await coordinator.cancelSnooze(alarmID: alarm.id)
+            await takeOverFromSystem(alarm: alarm)
+        }
     }
 
     /// Cuts a snooze short.
@@ -624,10 +790,6 @@ public final class AlarmRuntime: ObservableObject {
         // down. `BackstopPolicy` is the gatekeeper for every stand-down.
         coordinator.standDownBackstops(alarmID: alarm.id, on: .missionCompleted)
         nagArmed = false
-        Task {
-            await coordinator.silence(alarmID: alarm.id)
-            await coordinator.cancelStillRingingNag(alarmID: alarm.id)
-        }
 
         if alarm.wakeUpCheck.isEnabled {
             let fireAt = Date().addingTimeInterval(TimeInterval(alarm.wakeUpCheck.delayMinutes * 60))
@@ -647,12 +809,21 @@ public final class AlarmRuntime: ObservableObject {
             let reRingAt = fireAt.addingTimeInterval(
                 TimeInterval(alarm.wakeUpCheck.confirmWindowSeconds) + Self.wakeCheckReRingBuffer
             )
+            // One task, in order: silencing clears the old snooze chain, so
+            // it must finish before the re-ring is scheduled under the same
+            // prefix or the re-ring could be swept away with it.
             Task {
+                await coordinator.silence(alarmID: alarm.id)
+                await coordinator.cancelStillRingingNag(alarmID: alarm.id)
                 await coordinator.scheduleWakeUpCheck(alarm: alarm, at: fireAt)
                 await coordinator.scheduleSnooze(alarm: alarm, at: reRingAt)
             }
             log.info("Wake-up check armed for \(fireAt, privacy: .public), re-ring at \(reRingAt, privacy: .public)")
         } else {
+            Task {
+                await coordinator.silence(alarmID: alarm.id)
+                await coordinator.cancelStillRingingNag(alarmID: alarm.id)
+            }
             finishRecord(outcome: .dismissed)
             teardown(on: .missionCompleted)
         }
@@ -668,11 +839,17 @@ public final class AlarmRuntime: ObservableObject {
 
         wakeCheckFireAt = nil
         wakeCheckDeadline = Date().addingTimeInterval(TimeInterval(alarm.wakeUpCheck.confirmWindowSeconds))
+        firedAt = Date()
         phase = .wakeCheckRinging
         beginAudio(for: alarm)
         persistState()
-        // The check is audible and must survive a kill like any other ring.
-        Task { await coordinator.armBackstops(for: alarm) }
+        // This process owns the countdown now. The re-ring that was scheduled
+        // behind the check would land partway through a late-started window,
+        // so it stands down and the live chain takes its place.
+        Task {
+            await coordinator.cancelSnooze(alarmID: alarm.id)
+            await coordinator.armBackstops(for: alarm, occurrence: occurrenceDate ?? Date())
+        }
         log.info("Wake-up check started")
     }
 
@@ -711,6 +888,7 @@ public final class AlarmRuntime: ObservableObject {
 
     private func finishWakeCheck() {
         audio.stopAlarm()
+        VoiceBriefing.shared.stop()
         currentRecord?.wakeUpCheckPassed = true
         finishRecord(outcome: .dismissed)
 
@@ -922,6 +1100,11 @@ public final class AlarmRuntime: ObservableObject {
 
             phase = resumedPhase
             if restartAudio {
+                // The auto-stop window restarts with this ring, and the
+                // reminders armed before the kill are cancelled on the first
+                // foreground pass.
+                firedAt = Date()
+                nagArmed = true
                 beginAudio(for: alarm)
                 // The process was gone, so the live chain was not being kept
                 // ahead; re-arm it from now and stop anything alerting.

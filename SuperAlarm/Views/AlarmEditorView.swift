@@ -445,7 +445,7 @@ struct AlarmEditorView: View {
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             Task { @MainActor in
-                runtime.startRinging(alarm: alarm, occurrence: Date())
+                runtime.startRinging(alarm: alarm, occurrence: Date(), isPreview: true)
             }
         }
     }

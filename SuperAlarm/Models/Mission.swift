@@ -40,6 +40,23 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Lower-case noun for use mid-sentence: "finish your walk mission".
+    public var sentenceNoun: String {
+        switch self {
+        case .none: return "no"
+        case .math: return "maths"
+        case .pushup: return "push-up"
+        case .walk: return "walk"
+        case .faceID: return "Face ID"
+        case .objectScan: return "object-scan"
+        case .barcode: return "barcode-scan"
+        case .shake: return "shake"
+        case .memory: return "memory"
+        case .squat: return "squat"
+        case .typing: return "typing"
+        }
+    }
+
     public var symbolName: String {
         switch self {
         case .none: return "moon.zzz.fill"

@@ -118,6 +118,7 @@ final class AlarmKitBackend: SystemAlarmBackend {
     private let scheduledKey = "alarmkit.scheduledIDs"
     private let backstopKey = "alarmkit.backstopIDs"
     private let backstopModeKey = "alarmkit.backstopModes"
+    private let snoozeKey = "alarmkit.snoozeIDs"
 
     /// Why a follow-up chain exists, which decides who may replace it.
     ///
@@ -162,10 +163,24 @@ final class AlarmKitBackend: SystemAlarmBackend {
             return
         }
 
-        cancelTrackedAlarms()
+        // Self-heal: if nothing is tracked but the daemon still holds alarms
+        // for this app, they were scheduled by a launch whose bookkeeping
+        // was lost (an older build kept it in a non-persisting defaults
+        // suite). They can never be cancelled by name, so clear them all
+        // before scheduling a fresh, tracked set.
+        if scheduledMap().isEmpty, backstopMap().isEmpty, snoozeMap().isEmpty,
+           let orphans = try? manager.alarms, !orphans.isEmpty {
+            log.error("Found \(orphans.count, privacy: .public) untracked system alarms; clearing them")
+            for orphan in orphans {
+                try? manager.cancel(id: orphan.id)
+            }
+        }
 
         // AlarmKit's `Alarm` exposes no metadata, so the mapping from app
         // alarm to system alarm has to be tracked here to cancel precisely.
+        // New alarms are scheduled before the old ones are cancelled, so a
+        // crash in between leaves too many alarms rather than none.
+        let previous = scheduledMap()
         var scheduled: [String: [String]] = [:]
         var upcoming: [(alarm: AppAlarm, fire: Date)] = []
 
@@ -177,6 +192,13 @@ final class AlarmKitBackend: SystemAlarmBackend {
         }
 
         defaults.set(scheduled, forKey: scheduledKey)
+        for ids in previous.values {
+            for raw in ids {
+                if let id = UUID(uuidString: raw) {
+                    try? manager.cancel(id: id)
+                }
+            }
+        }
 
         // Pre-arm the follow-up chain behind the soonest occurrences, so that
         // pressing Stop on the system alert and rolling over is not the end
@@ -186,7 +208,7 @@ final class AlarmKitBackend: SystemAlarmBackend {
         let chained = Set(upcoming.prefix(BackstopPolicy.preArmedOccurrenceLimit).map { $0.alarm.id })
         for (raw, mode) in backstopModes() where mode == .preArmed {
             guard let alarmID = UUID(uuidString: raw), !chained.contains(alarmID) else { continue }
-            cancelBackstops(alarmID: alarmID)
+            await cancelBackstops(alarmID: alarmID)
         }
         for entry in upcoming.prefix(BackstopPolicy.preArmedOccurrenceLimit) {
             let current = backstopModes()[entry.alarm.id.uuidString]
@@ -203,7 +225,9 @@ final class AlarmKitBackend: SystemAlarmBackend {
 
     private func schedulePrimary(for alarm: AppAlarm, nextFire: Date) async -> UUID? {
         let schedule: AlarmKit.Alarm.Schedule
-        if alarm.repeatMode == .weekly, !alarm.repeatDays.isEmpty, !isMidnight(alarm) {
+        // A skipped occurrence needs an absolute date: a relative weekly
+        // schedule would fire on the skipped day regardless.
+        if alarm.repeatMode == .weekly, !alarm.repeatDays.isEmpty, !isMidnight(alarm), !alarm.skipNextOccurrence {
             schedule = .relative(
                 .init(
                     time: .init(hour: alarm.hour, minute: alarm.minute),
@@ -318,7 +342,7 @@ final class AlarmKitBackend: SystemAlarmBackend {
 
     /// Stops every follow-up alarm for one app alarm. Only the coordinator
     /// calls this, and only when `BackstopPolicy` says the event qualifies.
-    func cancelBackstops(alarmID: UUID) {
+    func cancelBackstops(alarmID: UUID) async {
         for entry in backstopChain(for: alarmID) {
             if let id = UUID(uuidString: entry.id) {
                 try? manager.stop(id: id)
@@ -337,7 +361,11 @@ final class AlarmKitBackend: SystemAlarmBackend {
     /// now, leaving everything scheduled for later in place. This is the
     /// hand-over: the app has taken over with its own audio.
     func stopAlerting(alarmID: UUID) {
-        let owned = Set((scheduledMap()[alarmID.uuidString] ?? []) + backstopChain(for: alarmID).map(\.id))
+        let owned = Set(
+            (scheduledMap()[alarmID.uuidString] ?? [])
+                + (snoozeMap()[alarmID.uuidString] ?? [])
+                + backstopChain(for: alarmID).map(\.id)
+        )
         guard let live = try? manager.alarms else { return }
         for systemAlarm in live where systemAlarm.state == .alerting && owned.contains(systemAlarm.id.uuidString) {
             try? manager.stop(id: systemAlarm.id)
@@ -449,7 +477,8 @@ final class AlarmKitBackend: SystemAlarmBackend {
     /// Removes everything for one app alarm — used when the alarm is deleted
     /// or disabled, never merely because it was dismissed.
     func cancel(alarmID: UUID) async {
-        cancelBackstops(alarmID: alarmID)
+        await cancelBackstops(alarmID: alarmID)
+        await cancelSnooze(alarmID: alarmID)
 
         var map = scheduledMap()
         for raw in map[alarmID.uuidString] ?? [] {
@@ -467,18 +496,38 @@ final class AlarmKitBackend: SystemAlarmBackend {
     /// it just waits for the snooze.
     func scheduleSnooze(alarm: AppAlarm, at date: Date) async {
         guard isAuthorized else { return }
-        _ = await schedule(
+        await cancelSnooze(alarmID: alarm.id)
+        if let id = await schedule(
             id: UUID(),
             appAlarm: alarm,
             schedule: .fixed(date),
             isBackstop: false,
             index: 0
-        )
+        ) {
+            var map = snoozeMap()
+            map[alarm.id.uuidString] = [id.uuidString]
+            defaults.set(map, forKey: snoozeKey)
+        }
         await replaceBackstops(
             for: alarm,
             dates: BackstopPolicy.dates(from: date, offsets: BackstopPolicy.snoozeOffsets),
             mode: .snooze
         )
+    }
+
+    /// Removes the snooze / wake-check re-ring alarm. Tracked separately so
+    /// confirming the wake-up check, or completing the mission after a
+    /// snooze was cut short, does not leave a system alarm to fire later.
+    func cancelSnooze(alarmID: UUID) async {
+        var map = snoozeMap()
+        for raw in map[alarmID.uuidString] ?? [] {
+            if let id = UUID(uuidString: raw) {
+                try? manager.stop(id: id)
+                try? manager.cancel(id: id)
+            }
+        }
+        map[alarmID.uuidString] = nil
+        defaults.set(map, forKey: snoozeKey)
     }
 
     func cancelAll() async {
@@ -491,6 +540,7 @@ final class AlarmKitBackend: SystemAlarmBackend {
         defaults.removeObject(forKey: scheduledKey)
         defaults.removeObject(forKey: backstopKey)
         defaults.removeObject(forKey: backstopModeKey)
+        defaults.removeObject(forKey: snoozeKey)
     }
 
     // MARK: Diagnostics
@@ -500,7 +550,8 @@ final class AlarmKitBackend: SystemAlarmBackend {
         let count = chains.values.reduce(0) { $0 + $1.count }
         let live = backstopModes().values.filter { $0 == .live }.count
         let systemCount = (try? manager.alarms.count) ?? 0
-        return "\(systemCount) system alarms, \(count) backstops (\(live) live chain)"
+        let liveText = live > 0 ? " (\(live) for the current ring)" : ""
+        return "\(systemCount) scheduled, \(count) follow-ups armed\(liveText)"
     }
 
     // MARK: Bookkeeping
@@ -518,6 +569,10 @@ final class AlarmKitBackend: SystemAlarmBackend {
 
     private func scheduledMap() -> [String: [String]] {
         defaults.dictionary(forKey: scheduledKey) as? [String: [String]] ?? [:]
+    }
+
+    private func snoozeMap() -> [String: [String]] {
+        defaults.dictionary(forKey: snoozeKey) as? [String: [String]] ?? [:]
     }
 
     /// Alarm ID → ["<systemID>@<fireDate seconds>"].

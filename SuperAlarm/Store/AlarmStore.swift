@@ -137,7 +137,13 @@ public final class AlarmStore: ObservableObject {
 
     /// Marks an alarm as having just fired. One-shot alarms switch themselves
     /// off; repeating alarms clear any pending skip.
-    public func markFired(id: UUID, at date: Date = Date()) {
+    ///
+    /// `notify: false` saves without asking the scheduler to rebuild. The
+    /// runtime uses that at ring start: a rebuild in the middle of arming the
+    /// follow-up chain would throw away the chain links that are the only
+    /// thing keeping the alarm alive if the app is killed. The rebuild
+    /// happens when the ring ends instead.
+    public func markFired(id: UUID, at date: Date = Date(), notify: Bool = true) {
         guard let index = alarms.firstIndex(where: { $0.id == id }) else { return }
         alarms[index].lastFiredAt = date
         if alarms[index].skipNextOccurrence {
@@ -146,7 +152,12 @@ public final class AlarmStore: ObservableObject {
         if !alarms[index].isRepeating {
             alarms[index].isEnabled = false
         }
-        commit()
+        if notify {
+            commit()
+        } else {
+            files.save(alarms, to: StorageLocation.alarmsFile)
+            writeWidgetSnapshot()
+        }
     }
 
     // MARK: History

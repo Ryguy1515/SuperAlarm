@@ -44,7 +44,7 @@ public final class PendingMission: @unchecked Sendable {
     /// Consumes the pending mission, if there is a recent one. Anything older
     /// than the window is stale — the user opened the app much later — and is
     /// discarded rather than firing an alarm out of nowhere.
-    public func consume(within window: TimeInterval = 60 * 60) -> UUID? {
+    public func consume(within window: TimeInterval = 30 * 60) -> UUID? {
         guard let id = armedAlarmID else { return nil }
         defer { armedAlarmID = nil }
         guard let armedAt, Date().timeIntervalSince(armedAt) <= window else { return nil }

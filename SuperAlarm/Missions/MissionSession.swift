@@ -31,12 +31,14 @@ public final class MissionSession: ObservableObject {
     ///   - now: when the mission started. Pass the original start when
     ///     resuming after a relaunch so elapsed time and step counts carry on.
     ///   - completedRounds: rounds already passed before a relaunch.
-    public init(settings: MissionSettings, now: Date = Date(), completedRounds: Int = 0) {
+    ///   - reference: the current time, injectable so tests are not tied to
+    ///     the wall clock.
+    public init(settings: MissionSettings, now: Date = Date(), completedRounds: Int = 0, reference: Date = Date()) {
         self.settings = settings
         self.startedAt = now
         self.completedRounds = max(0, min(completedRounds, max(1, settings.rounds)))
         if settings.timeLimitSeconds > 0 {
-            let elapsed = Int(Date().timeIntervalSince(now))
+            let elapsed = Int(reference.timeIntervalSince(now))
             secondsRemaining = max(0, settings.timeLimitSeconds - max(0, elapsed))
         }
     }
@@ -74,8 +76,10 @@ public final class MissionSession: ObservableObject {
     }
 
     private func tick() {
-        guard !isComplete, let remaining = secondsRemaining else { return }
-        let next = remaining - 1
+        guard !isComplete, secondsRemaining != nil else { return }
+        // Wall-clock, not tick-counted: a suspended process must not stretch
+        // the limit.
+        let next = settings.timeLimitSeconds - Int(Date().timeIntervalSince(startedAt))
         secondsRemaining = max(0, next)
         if next <= 0 {
             didTimeOut = true

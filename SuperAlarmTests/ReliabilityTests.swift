@@ -214,6 +214,24 @@ final class RingStateRestorePlanTests: XCTestCase {
         )
     }
 
+    func testAStateFileMissingOptionalKeysOrWithAnUnknownPhaseStillResumes() throws {
+        // A newer build's phase name, and none of the defaulted keys.
+        let json = """
+        {
+          "alarmID": "1B4E28BA-2FA1-11D2-883F-B9A761BDE3FB",
+          "occurrenceDate": 1800000000,
+          "firedAt": 1800000000,
+          "snoozeCount": 0,
+          "phase": "somethingNew"
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let state = try decoder.decode(PersistedRingState.self, from: Data(json.utf8))
+        XCTAssertEqual(state.phase, .ringing, "An unknown phase must resume as a ring, never drop the alarm")
+        XCTAssertTrue(state.handledOccurrences.isEmpty)
+    }
+
     func testOlderStateFilesWithoutMissionFieldsStillDecode() throws {
         // Written by a build that predates mission persistence.
         let json = """
@@ -353,9 +371,107 @@ final class MissionResumeTests: XCTestCase {
     func testATimeLimitAccountsForTimeAlreadySpent() {
         var settings = MissionSettings(type: .typing)
         settings.timeLimitSeconds = 120
-        let session = MissionSession(settings: settings, now: Date().addingTimeInterval(-50))
-        XCTAssertNotNil(session.secondsRemaining)
-        XCTAssertLessThanOrEqual(session.secondsRemaining ?? 999, 71)
-        XCTAssertGreaterThanOrEqual(session.secondsRemaining ?? -1, 68)
+        let reference = Date(timeIntervalSince1970: 1_800_000_000)
+        let session = MissionSession(
+            settings: settings,
+            now: reference.addingTimeInterval(-50),
+            reference: reference
+        )
+        XCTAssertEqual(session.secondsRemaining, 70)
+    }
+}
+
+final class DueDecisionTests: XCTestCase {
+
+    private var calendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        return cal
+    }()
+
+    private func date(_ hour: Int, _ minute: Int) -> Date {
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 8
+        components.day = 6
+        components.hour = hour
+        components.minute = minute
+        return calendar.date(from: components)!
+    }
+
+    private func dailyAlarm() -> Alarm {
+        var alarm = Alarm(hour: 7, minute: 0)
+        alarm.repeatMode = .weekly
+        alarm.repeatDays = Weekday.everyDay
+        return alarm
+    }
+
+    func testAnAlarmThatJustPassedRings() {
+        let decision = DueDecision.make(
+            for: dailyAlarm(), reference: date(7, 2), catchUpWindow: 1800,
+            alreadyHandled: { _ in false }, calendar: calendar
+        )
+        XCTAssertEqual(decision, .ring(date(7, 0)))
+    }
+
+    func testAnOccurrenceTheStoreAlreadyFiredIsIgnored() {
+        // The in-memory bookkeeping dies with the process; the store's
+        // last-fired stamp is what stops a dismissed alarm re-ringing.
+        var alarm = dailyAlarm()
+        alarm.lastFiredAt = date(7, 0)
+        let decision = DueDecision.make(
+            for: alarm, reference: date(7, 10), catchUpWindow: 1800,
+            alreadyHandled: { _ in false }, calendar: calendar
+        )
+        XCTAssertEqual(decision, .none)
+    }
+
+    func testASafetyNetStampLaterThanTheOccurrenceStillCounts() {
+        var alarm = dailyAlarm()
+        alarm.lastFiredAt = date(7, 4)
+        let decision = DueDecision.make(
+            for: alarm, reference: date(7, 10), catchUpWindow: 1800,
+            alreadyHandled: { _ in false }, calendar: calendar
+        )
+        XCTAssertEqual(decision, .none)
+    }
+
+    func testASkippedOccurrenceClearsTheSkipInsteadOfRinging() {
+        var alarm = dailyAlarm()
+        alarm.skipNextOccurrence = true
+        let decision = DueDecision.make(
+            for: alarm, reference: date(7, 1), catchUpWindow: 1800,
+            alreadyHandled: { _ in false }, calendar: calendar
+        )
+        XCTAssertEqual(decision, .clearSkip(date(7, 0)), "Otherwise the skip swallows every later occurrence")
+    }
+
+    func testTooLateIsRecordedAsMissed() {
+        var alarm = dailyAlarm()
+        alarm.sound.autoStopMinutes = 5
+        let decision = DueDecision.make(
+            for: alarm, reference: date(7, 20), catchUpWindow: 1800,
+            alreadyHandled: { _ in false }, calendar: calendar
+        )
+        XCTAssertEqual(decision, .missed(date(7, 0)))
+    }
+
+    func testHandledAndDisabledAlarmsDoNothing() {
+        XCTAssertEqual(
+            DueDecision.make(
+                for: dailyAlarm(), reference: date(7, 2), catchUpWindow: 1800,
+                alreadyHandled: { _ in true }, calendar: calendar
+            ),
+            .none
+        )
+        var off = dailyAlarm()
+        off.isEnabled = false
+        XCTAssertEqual(
+            DueDecision.make(
+                for: off, reference: date(7, 2), catchUpWindow: 1800,
+                alreadyHandled: { _ in false }, calendar: calendar
+            ),
+            .none
+        )
     }
 }

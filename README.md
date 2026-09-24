@@ -98,12 +98,23 @@ Do this the evening before you first rely on it.
 
 ---
 
-## Fidelity notes
+## What iOS does not allow
 
-Two advertised behaviours cannot be reproduced exactly, and the app is honest about it rather than pretending:
+No third-party app can do any of the following, and this one does not pretend to:
 
-- **"App deletion prevention while alarm is ringing."** No third-party iOS app can block its own deletion. Doing so requires `ManagedSettings.denyAppRemoval`, which needs the **Family Controls** entitlement — Apple approval, paid account, and it would break free-account signing entirely. What this build does instead is arguably stronger: alarms are owned by the system, so they keep firing even if the app is closed, and a **backstop chain** of follow-up alarms is armed the moment one starts, cancelled only when a mission is genuinely completed.
-- **"Power-off prevention."** Android-only in the original, via an Accessibility Service. iOS has no equivalent API.
+| You might expect | What iOS actually permits | What SuperAlarm does instead |
+|---|---|---|
+| Block the Home gesture or the app switcher | Nothing. An app cannot keep itself on screen. | The alarm keeps playing in the background, and a *still ringing* notification lands within seconds and keeps repeating; tapping it puts you straight back on the mission. |
+| Survive a force-quit | Nothing runs after the process is killed. Only alarms the *system* owns survive. | Follow-up **backstop alarms** are scheduled by the system together with every alarm (30 s, 60 s, 2, 3, 5, 8 and 12 minutes after it) and re-armed from "now" every time the app rings. Killing the app leaves that chain intact; the next one lands within about 30 seconds. Reopening the app resumes the ring and the mission you still owe. Only a completed mission stands the chain down. |
+| Disable the volume buttons | Nothing. The buttons always work. | While the app is ringing it watches the output volume and pushes it back within a frame, so a press produces a momentary dip, not a quiet alarm. (While the *system* alert is sounding — before you open the app — any button dismisses it outright; that is Apple's AlarmKit behaviour, and it is why the backstops exist.) |
+| Prevent the app being deleted | Requires `ManagedSettings.denyAppRemoval` and the **Family Controls** entitlement: Apple approval, a paid account, and it breaks free-account signing. | Nothing. Deleting the app deletes its alarms too; there is no way round that. |
+| Prevent the phone being powered off | No API. Android-only in the original. | Nothing. |
+| Guided Access, MDM lock-down | Device-management features, not app features. | Out of scope. |
+
+Two honest side effects of the defences that *are* possible:
+
+- The **system volume HUD does not appear** while the app is in front. The hidden control that lets the app set the volume suppresses it. The ring screen shows *Volume locked* and flashes *Volume restored* instead.
+- An AlarmKit alert and the app's own audio can briefly **overlap for a second** when you tap *Start mission*: the app arms its follow-up chain before it stops the system alert, so there is never a moment with nothing armed.
 
 One deliverable is deliberately left out:
 

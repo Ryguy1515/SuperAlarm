@@ -58,9 +58,21 @@ public enum StorageLocation {
     public static let ringStateFile = "ring-state.json"
 
     /// Shared defaults, used for small flags the widget also needs.
-    public static var defaults: UserDefaults {
-        UserDefaults(suiteName: appGroupID) ?? .standard
-    }
+    ///
+    /// Only the App Group suite when the container is actually reachable.
+    /// Without the entitlement `UserDefaults(suiteName:)` does not return
+    /// nil on a device — it returns a suite that detaches from the
+    /// preferences daemon and forgets everything at the next launch. The
+    /// AlarmKit bookkeeping lives here, so that would mean every launch
+    /// scheduling a fresh set of system alarms it could never cancel again.
+    public static var defaults: UserDefaults { resolvedDefaults }
+
+    private static let resolvedDefaults: UserDefaults = {
+        guard hasSharedContainer, let suite = UserDefaults(suiteName: appGroupID) else {
+            return .standard
+        }
+        return suite
+    }()
 }
 
 // MARK: - Disk IO
