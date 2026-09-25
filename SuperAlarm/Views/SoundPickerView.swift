@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SoundPickerView: View {
+    @State private var tonePendingDelete: AlarmTone?
     @Binding var sound: SoundSettings
 
     @StateObject private var audio = AlarmAudioEngine.shared
@@ -81,7 +82,7 @@ struct SoundPickerView: View {
                 subtitle: sound.isEnabled ? nil : "The alarm will only vibrate",
                 showsChevron: false
             ) {
-                Toggle("", isOn: $sound.isEnabled)
+                Toggle("Enable sound", isOn: $sound.isEnabled)
                     .labelsHidden()
                     .tint(SAColor.accent)
             }
@@ -117,7 +118,7 @@ struct SoundPickerView: View {
                     VStack(spacing: 6) {
                         Text(item.rawValue)
                             .font(SAFont.headline(17))
-                            .foregroundStyle(tab == item ? SAColor.accent : SAColor.textTertiary)
+                            .foregroundStyle(tab == item ? SAColor.accentText : SAColor.textTertiary)
                         Capsule()
                             .fill(tab == item ? SAColor.accent : Color.clear)
                             .frame(height: 3)
@@ -186,7 +187,7 @@ struct SoundPickerView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Random (\(category.displayName))")
                         .font(SAFont.emphasis(16))
-                        .foregroundStyle(SAColor.accent)
+                        .foregroundStyle(SAColor.accentText)
                     Text("A different sound every morning, so you never get used to one")
                         .font(SAFont.body(12))
                         .foregroundStyle(SAColor.textSecondary)
@@ -279,7 +280,7 @@ struct SoundPickerView: View {
                 }
                 .saGroupedCard()
 
-                Text("Imported audio plays through the app once the alarm hands over. The system's own lock-screen alert uses a built-in tone.")
+                Text("Imported audio plays once the alarm opens in the app; the Lock Screen alert itself uses a built-in tone.")
                     .font(SAFont.body(12))
                     .foregroundStyle(SAColor.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -316,25 +317,39 @@ struct SoundPickerView: View {
                 Image(systemName: isPreviewing ? "stop.fill" : "play.fill")
                     .font(.system(size: 13, weight: .black))
                     .foregroundStyle(isPreviewing ? SAColor.onAccent : SAColor.accent)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 36, height: 36)
                     .background(Circle().fill(isPreviewing ? SAColor.accent : SAColor.accent.opacity(0.15)))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isPreviewing ? "Stop preview" : "Preview \(tone.name)")
 
             Button(role: .destructive) {
-                if sound.toneID == tone.id { sound.toneID = SoundCatalog.defaultToneID }
-                audio.stopPreview()
-                customTones.delete(id: tone.id)
+                tonePendingDelete = tone
             } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(SAColor.danger)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 36, height: 36)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete \(tone.name)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+        .confirmationDialog(
+            "Delete \(tonePendingDelete?.name ?? "this tone")?",
+            isPresented: Binding(get: { tonePendingDelete != nil }, set: { if !$0 { tonePendingDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let tone = tonePendingDelete {
+                    if sound.toneID == tone.id { sound.toneID = SoundCatalog.defaultToneID }
+                    audio.stopPreview()
+                    customTones.delete(id: tone.id)
+                }
+                tonePendingDelete = nil
+            }
+        }
     }
 
     private func handleImport(_ result: Result<[URL], Error>) {
@@ -404,7 +419,7 @@ struct SoundPickerView: View {
                         Text("Override device volume")
                             .font(SAFont.emphasis(16))
                             .foregroundStyle(SAColor.textPrimary)
-                        Text("Turns the phone up when the alarm starts, so a muted phone still wakes you")
+                        Text("Turns the phone up when the alarm starts, so a phone turned right down still wakes you")
                             .font(SAFont.body(12))
                             .foregroundStyle(SAColor.textSecondary)
                     }

@@ -14,6 +14,9 @@ public protocol SystemAlarmBackend: AnyObject {
     var isSupported: Bool { get }
     /// True once the user has granted permission.
     var isAuthorized: Bool { get }
+    /// True once the user has explicitly declined, so the UI can send them
+    /// to Settings instead of asking again.
+    var isDenied: Bool { get }
     func requestAuthorization() async -> Bool
     /// Replaces every scheduled system alarm with the given set, including
     /// the pre-armed follow-up chains behind the soonest occurrences.
@@ -42,6 +45,7 @@ public protocol SystemAlarmBackend: AnyObject {
 }
 
 public extension SystemAlarmBackend {
+    var isDenied: Bool { false }
     func scheduleBackstops(for alarm: Alarm, from base: Date) async {}
     func refreshBackstops(for alarm: Alarm, now: Date) async {}
     func cancelBackstops(alarmID: UUID) async {}
@@ -69,6 +73,8 @@ public final class AlarmCoordinator: ObservableObject {
 
     @Published public private(set) var notificationsAuthorized = false
     @Published public private(set) var systemAlarmsAuthorized = false
+    /// The system alarm permission was declined outright.
+    @Published public private(set) var systemAlarmsDenied = false
     @Published public private(set) var lastRebuildAt: Date?
     @Published public private(set) var pendingNotificationCount = 0
     /// Last time the live backstop chain was armed or rolled forward.
@@ -103,27 +109,30 @@ public final class AlarmCoordinator: ObservableObject {
     }
 
     public var systemBackendName: String {
-        systemBackend?.isSupported == true ? "AlarmKit" : "Notifications"
+        systemBackend?.isSupported == true ? "System alarms (iOS 26)" : "Notifications"
     }
 
     /// What will bring the user back if the app is killed.
     public var reSummonDescription: String {
-        usesSystemAlarms ? "AlarmKit backstops + notification chain" : "Notification chain"
+        usesSystemAlarms ? "System follow-up alarms and repeat notifications" : "Repeat notifications"
     }
 
     public var backendDiagnostics: String {
-        systemBackend?.diagnosticSummary ?? "No system backend"
+        systemBackend?.diagnosticSummary ?? "Not available"
     }
 
     // MARK: Authorization
 
     public func requestAllAuthorizations() async {
         notifications.registerCategories()
-        notificationsAuthorized = await notifications.requestAuthorization()
 
+        // The system alarm permission first: it is the one that matters, and
+        // the second prompt in a row is the one people reflexively dismiss.
         if let backend = systemBackend, backend.isSupported {
             systemAlarmsAuthorized = await backend.requestAuthorization()
+            systemAlarmsDenied = backend.isDenied
         }
+        notificationsAuthorized = await notifications.requestAuthorization()
         log.info(
             "Authorization — notifications: \(self.notificationsAuthorized, privacy: .public), system: \(self.systemAlarmsAuthorized, privacy: .public)"
         )
@@ -132,6 +141,7 @@ public final class AlarmCoordinator: ObservableObject {
     public func refreshAuthorizationStatus() async {
         notificationsAuthorized = await notifications.authorizationStatus() == .authorized
         systemAlarmsAuthorized = systemBackend?.isAuthorized ?? false
+        systemAlarmsDenied = systemBackend?.isDenied ?? false
         pendingNotificationCount = await notifications.pendingCount()
     }
 

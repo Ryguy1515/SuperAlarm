@@ -76,11 +76,19 @@ struct AlarmEditorView: View {
                 .labelsHidden()
                 .environment(\.locale, store.settings.use24HourClock ? Locale(identifier: "en_GB") : Locale(identifier: "en_US"))
 
-                Text(draft.timeUntilDescription(from: Date()).map { "Rings \($0)" } ?? "Currently off")
+                Text(draft.timeUntilDescription(from: Date()).map { "Rings \($0)" } ?? timeFallbackText)
                     .font(SAFont.body(13))
                     .foregroundStyle(SAColor.textSecondary)
                     .padding(.bottom, 8)
             }
+        }
+    }
+
+    private var timeFallbackText: String {
+        switch draft.repeatMode {
+        case .dates where draft.specificDates.isEmpty: return "Pick a date below"
+        case .dates: return "No dates left"
+        case .once, .weekly: return "Currently off"
         }
     }
 
@@ -149,13 +157,15 @@ struct AlarmEditorView: View {
                             .font(SAFont.caption(14))
                             .foregroundStyle(selected ? SAColor.onAccent : SAColor.textSecondary)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 42)
+                            .frame(minHeight: 42)
                             .background(
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                                     .fill(selected ? SAColor.accent : SAColor.surfaceElevated)
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(day.fullName)
+                    .accessibilityAddTraits(selected ? [.isSelected] : [])
                 }
             }
 
@@ -344,7 +354,7 @@ struct AlarmEditorView: View {
                             iconTint: draft.skipNextOccurrence ? SAColor.warning : SAColor.textTertiary,
                             showsChevron: false
                         ) {
-                            Toggle("", isOn: $draft.skipNextOccurrence)
+                            Toggle("Skip next occurrence", isOn: $draft.skipNextOccurrence)
                                 .labelsHidden()
                                 .tint(SAColor.accent)
                         }
@@ -362,7 +372,9 @@ struct AlarmEditorView: View {
             SASectionHeader("Colour tag")
 
             SACard(padding: 14) {
-                HStack(spacing: 12) {
+                // Adaptive grid: eight fixed-width dots overflowed the card
+                // on the smallest phones.
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 34), spacing: 12)], spacing: 12) {
                     ForEach(Array(AlarmPalette.tags.enumerated()), id: \.offset) { index, hex in
                         Button {
                             HapticEngine.shared.selection()
@@ -378,10 +390,12 @@ struct AlarmEditorView: View {
                                             .padding(-4)
                                     }
                                 }
+                                .frame(width: 44, height: 44)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Colour \(index + 1)")
+                        .accessibilityAddTraits(draft.colorTag == index ? [.isSelected] : [])
                     }
-                    Spacer(minLength: 0)
                 }
             }
         }
@@ -391,27 +405,27 @@ struct AlarmEditorView: View {
 
     private var actionsSection: some View {
         VStack(spacing: 12) {
-            Button {
-                testAlarm()
-            } label: {
-                Label("Test this alarm now", systemImage: "play.fill")
+            VStack(spacing: 6) {
+                Button {
+                    testAlarm()
+                } label: {
+                    Label("Save and test now", systemImage: "play.fill")
+                }
+                .buttonStyle(SecondaryButtonStyle())
+
+                Text("Saves the alarm, then rings it so you can rehearse the whole flow.")
+                    .font(SAFont.caption(12))
+                    .foregroundStyle(SAColor.textSecondary)
+                    .multilineTextAlignment(.center)
             }
-            .buttonStyle(SecondaryButtonStyle())
 
             if existsInStore {
                 Button(role: .destructive) {
                     showingDeleteConfirm = true
                 } label: {
                     Label("Delete alarm", systemImage: "trash")
-                        .font(SAFont.emphasis(16))
-                        .foregroundStyle(SAColor.danger)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: SAMetrics.buttonHeight)
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: SAMetrics.buttonRadius, style: .continuous)
-                        .fill(SAColor.danger.opacity(0.12))
-                )
+                .buttonStyle(DestructiveButtonStyle())
             }
         }
     }
@@ -425,6 +439,12 @@ struct AlarmEditorView: View {
         // out of their own alarm, so fall back to no mission.
         if !alarm.mission.isReady {
             alarm.mission = MissionSettings()
+        }
+        // "Dates" with no dates, or "Weekly" with no days, would save as an
+        // alarm that shows as on and never rings; both mean "once".
+        if (alarm.repeatMode == .dates && alarm.specificDates.isEmpty)
+            || (alarm.repeatMode == .weekly && alarm.repeatDays.isEmpty) {
+            alarm.repeatMode = .once
         }
         store.update(alarm)
         HapticEngine.shared.success()

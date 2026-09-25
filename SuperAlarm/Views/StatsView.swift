@@ -39,6 +39,7 @@ struct StatsView: View {
                             Image(systemName: "trash")
                                 .foregroundStyle(SAColor.textSecondary)
                         }
+                        .accessibilityLabel("Clear history")
                     }
                 }
             }
@@ -124,7 +125,7 @@ struct StatsView: View {
             )
             statTile(
                 value: formatDuration(stats.averageDismissSeconds),
-                label: "Average to dismiss",
+                label: "Average time to turn off",
                 icon: "timer",
                 tint: SAColor.warning
             )
@@ -178,16 +179,27 @@ struct StatsView: View {
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .fill(barColour(day))
                                 .frame(height: barHeight(day))
+                                .accessibilityLabel(barAccessibilityLabel(day))
                                 .frame(maxWidth: .infinity)
                         }
                         .frame(height: 90, alignment: .bottom)
                     }
                 }
 
-                HStack(spacing: 16) {
-                    legend(colour: SAColor.success, text: "Woke up")
-                    legend(colour: SAColor.warning, text: "Snoozed a lot")
-                    legend(colour: SAColor.separator, text: "No alarm")
+                // Wraps at large text sizes instead of overflowing the card.
+                ViewThatFits {
+                    HStack(spacing: 14) {
+                        legend(colour: SAColor.success, text: "Woke up")
+                        legend(colour: SAColor.warning, text: "Snoozed a lot")
+                        legend(colour: SAColor.danger, text: "Missed")
+                        legend(colour: SAColor.separator, text: "No alarm")
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        legend(colour: SAColor.success, text: "Woke up")
+                        legend(colour: SAColor.warning, text: "Snoozed a lot")
+                        legend(colour: SAColor.danger, text: "Missed")
+                        legend(colour: SAColor.separator, text: "No alarm")
+                    }
                 }
             }
         }
@@ -199,6 +211,15 @@ struct StatsView: View {
         let seconds = day.dismissSeconds ?? 60
         let normalised = min(1, seconds / 600)
         return 20 + CGFloat(normalised) * 68
+    }
+
+    private func barAccessibilityLabel(_ day: WakeStatistics.DaySummary) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM"
+        let date = formatter.string(from: day.date)
+        guard day.hasRecord else { return "\(date): no alarm" }
+        if !day.succeeded { return "\(date): missed" }
+        return day.snoozes > 0 ? "\(date): woke up after \(day.snoozes) snoozes" : "\(date): woke up"
     }
 
     private func barColour(_ day: WakeStatistics.DaySummary) -> Color {
@@ -283,6 +304,7 @@ struct StatsView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(outcomeColour(record.outcome))
                 .frame(width: 26)
+                .accessibilityLabel(record.outcome.displayName)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.alarmLabel)

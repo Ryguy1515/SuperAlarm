@@ -68,14 +68,13 @@ struct SettingsView: View {
                     Image(systemName: coordinator.usesSystemAlarms ? "checkmark.shield.fill" : "shield.lefthalf.filled")
                         .font(.system(size: 26, weight: .bold))
                         .foregroundStyle(coordinator.usesSystemAlarms ? SAColor.success : SAColor.warning)
+                        .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(coordinator.usesSystemAlarms ? "System alarms active" : "Notification fallback")
+                        Text(reliabilityTitle)
                             .font(SAFont.emphasis(16))
                             .foregroundStyle(SAColor.textPrimary)
-                        Text(coordinator.usesSystemAlarms
-                             ? "Alarms ring through Silent mode, Do Not Disturb and Focus."
-                             : "This device cannot use system alarms, so notifications and background audio are used instead.")
+                        Text(reliabilityDetail)
                             .font(SAFont.body(12))
                             .foregroundStyle(SAColor.textSecondary)
                     }
@@ -88,6 +87,22 @@ struct SettingsView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var reliabilityTitle: String {
+        if coordinator.usesSystemAlarms { return "System alarms active" }
+        if coordinator.systemBackend?.isSupported == true { return "System alarms are turned off — tap to fix" }
+        return "Notifications only"
+    }
+
+    private var reliabilityDetail: String {
+        if coordinator.usesSystemAlarms {
+            return "Alarms ring through Silent mode, Do Not Disturb and Focus."
+        }
+        if coordinator.systemBackend?.isSupported == true {
+            return "This phone supports system alarms but the permission was declined, so alarms cannot ring through Silent mode until it is granted."
+        }
+        return "This phone cannot use system alarms, so notifications and background audio are used instead."
     }
 
     // MARK: Appearance
@@ -110,7 +125,7 @@ struct SettingsView: View {
                 SADivider()
 
                 SARow(icon: "clock.fill", title: "24-hour clock", showsChevron: false) {
-                    Toggle("", isOn: $store.settings.use24HourClock)
+                    Toggle("24-hour clock", isOn: $store.settings.use24HourClock)
                         .labelsHidden()
                         .tint(SAColor.accent)
                 }
@@ -118,7 +133,7 @@ struct SettingsView: View {
                 SADivider()
 
                 SARow(icon: "hand.tap.fill", title: "Haptic feedback", showsChevron: false) {
-                    Toggle("", isOn: $store.settings.hapticFeedback)
+                    Toggle("Haptic feedback", isOn: $store.settings.hapticFeedback)
                         .labelsHidden()
                         .tint(SAColor.accent)
                 }
@@ -194,27 +209,15 @@ struct SettingsView: View {
                     subtitle: "Restores the level if the side buttons lower it",
                     showsChevron: false
                 ) {
-                    Toggle("", isOn: $store.settings.lockVolumeWhileRinging)
+                    Toggle("Lock the volume", isOn: $store.settings.lockVolumeWhileRinging)
                         .labelsHidden()
                         .tint(SAColor.accent)
                 }
 
-                SADivider()
-
-                SARow(
-                    icon: "lock.iphone",
-                    title: "Keep the alarm on screen",
-                    subtitle: "Puts the alarm back in front whenever you return to the app",
-                    showsChevron: false
-                ) {
-                    Toggle("", isOn: $store.settings.deletionGuard)
-                        .labelsHidden()
-                        .tint(SAColor.accent)
-                }
             }
             .saGroupedCard()
 
-            Text("iOS does not let any third-party app block itself from being deleted or stop the phone being powered off. What keeps you honest instead is that alarms are owned by the system, so they keep firing even if the app is closed — and a follow-up alarm is armed every time one starts, cancelled only once a mission is actually completed.")
+            Text("iOS does not let any app block the Home gesture, the app switcher, force-quit, the volume buttons, deletion or power-off. What keeps you honest instead: the alarm stays on screen whenever you come back, follow-up alarms owned by the system are armed with every alarm and re-armed while it rings, and they stand down only once a mission is completed or you give up through the escape hatch.")
                 .font(SAFont.body(12))
                 .foregroundStyle(SAColor.textTertiary)
                 .padding(.horizontal, 4)
@@ -229,14 +232,14 @@ struct SettingsView: View {
 
             VStack(spacing: 0) {
                 SARow(
-                    icon: "battery.100.bolt",
+                    icon: "battery.100percent.bolt",
                     title: "Background keep-alive",
                     subtitle: coordinator.usesSystemAlarms
                         ? "Not needed — system alarms are handling this"
                         : "Keeps the app running near an alarm so it can ring",
                     showsChevron: false
                 ) {
-                    Toggle("", isOn: $store.settings.backgroundKeepAlive)
+                    Toggle("Background keep-alive", isOn: $store.settings.backgroundKeepAlive)
                         .labelsHidden()
                         .tint(SAColor.accent)
                         .disabled(coordinator.usesSystemAlarms)
@@ -260,10 +263,10 @@ struct SettingsView: View {
                 SARow(
                     icon: "bell.badge",
                     title: "Extra notification backup",
-                    subtitle: "Also rings via notifications. May double up with system alarms.",
+                    subtitle: "Repeat notifications that keep re-summoning you after the first alert, even if the app is closed.",
                     showsChevron: false
                 ) {
-                    Toggle("", isOn: $store.settings.redundantNotificationBackup)
+                    Toggle("Extra notification backup", isOn: $store.settings.redundantNotificationBackup)
                         .labelsHidden()
                         .tint(SAColor.accent)
                 }
@@ -280,7 +283,7 @@ struct SettingsView: View {
 
             VStack(spacing: 0) {
                 SARow(icon: "cloud.sun.fill", title: "Show weather", showsChevron: false) {
-                    Toggle("", isOn: $store.settings.showWeather)
+                    Toggle("Show weather", isOn: $store.settings.showWeather)
                         .labelsHidden()
                         .tint(SAColor.accent)
                 }
@@ -294,7 +297,8 @@ struct SettingsView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 110)
+                        .frame(minWidth: 110)
+                        .fixedSize()
                     }
                 }
             }
@@ -312,8 +316,8 @@ struct SettingsView: View {
                 Button { showingPaywall = true } label: {
                     SARow(
                         icon: "crown.fill",
-                        title: "Membership",
-                        subtitle: store.settings.isPro ? "All features unlocked" : "Free tier"
+                        title: "SuperAlarm Pro",
+                        subtitle: store.settings.isPro ? "Everything unlocked" : "Free plan"
                     )
                 }
 
@@ -443,7 +447,7 @@ struct DiagnosticsView: View {
     private var diagnosticRows: [(title: String, value: String)] {
         [
             ("Alarm mechanism", coordinator.systemBackendName),
-            ("System alarms authorised", coordinator.systemAlarmsAuthorized ? "Yes" : "No"),
+            ("System alarms authorised", coordinator.systemAlarmsAuthorized ? "Yes" : (coordinator.systemAlarmsDenied ? "Declined" : "No")),
             ("Notifications authorised", coordinator.notificationsAuthorized ? "Yes" : "No"),
             ("Pending notifications", "\(coordinator.pendingNotificationCount)"),
             ("Enabled alarms", "\(store.enabledAlarms.count)"),
@@ -451,7 +455,7 @@ struct DiagnosticsView: View {
             // main-actor-isolated method as a plain function value warns.
             ("Last rebuild", coordinator.lastRebuildAt.map { timeString($0) } ?? "Never"),
             ("Shared container", StorageLocation.hasSharedContainer ? "Yes" : "No (widget data unavailable)"),
-            ("Runtime phase", runtime.phase.rawValue),
+            ("Alarm state", phaseLabel(runtime.phase)),
             ("Bundled sounds", missingTones.isEmpty ? "All present" : "\(missingTones.count) missing"),
             ("Volume control", SystemVolume.shared.diagnosticStatus),
             ("Output volume", "\(Int((SystemVolume.shared.current * 100).rounded()))%"),
@@ -479,6 +483,17 @@ struct DiagnosticsView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    private func phaseLabel(_ phase: AlarmRuntime.Phase) -> String {
+        switch phase {
+        case .idle: return "Idle"
+        case .ringing: return "Ringing"
+        case .mission: return "Mission running"
+        case .snoozed: return "Snoozed"
+        case .wakeCheckPending: return "Wake-up check due"
+        case .wakeCheckRinging: return "Wake-up check ringing"
+        }
     }
 
     private func fullDateString(_ date: Date) -> String {

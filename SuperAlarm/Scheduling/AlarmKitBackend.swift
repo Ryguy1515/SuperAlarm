@@ -39,7 +39,7 @@ struct SuperAlarmMetadata: AlarmMetadata {
 /// backstop chain — not this intent — is what guarantees the user gets up.
 @available(iOS 26.0, *)
 struct SuperAlarmStopIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "Stop"
+    static var title: LocalizedStringResource = "Turn off"
     static var description = IntentDescription("Stops the alarm that is currently sounding.")
 
     @Parameter(title: "systemAlarmID") var systemAlarmID: String
@@ -135,6 +135,10 @@ final class AlarmKitBackend: SystemAlarmBackend {
 
     var isAuthorized: Bool {
         manager.authorizationState == .authorized
+    }
+
+    var isDenied: Bool {
+        manager.authorizationState == .denied
     }
 
     func requestAuthorization() async -> Bool {
@@ -383,10 +387,12 @@ final class AlarmKitBackend: SystemAlarmBackend {
             ? "Still asleep?"
             : LocalizedStringResource(stringLiteral: appAlarm.displayLabel)
 
+        // With no mission the secondary button opens the app; calling it
+        // "Turn off" next to a Stop button was two stop-like controls.
         let missionButton = AlarmButton(
-            text: appAlarm.mission.type == .none ? "Turn off" : "Start mission",
+            text: appAlarm.mission.type == .none ? "Open SuperAlarm" : "Start mission",
             textColor: .black,
-            systemImageName: appAlarm.mission.type == .none ? "stop.fill" : appAlarm.mission.type.symbolName
+            systemImageName: appAlarm.mission.type == .none ? "alarm.fill" : appAlarm.mission.type.symbolName
         )
 
         let alert: AlarmPresentation.Alert

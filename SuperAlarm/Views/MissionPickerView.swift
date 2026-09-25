@@ -314,7 +314,7 @@ struct MissionConfigView: View {
                         draft.difficulty = level
                     } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: draft.difficulty == level ? "largecircle.fill.circle" : "circle")
+                            Image(systemName: draft.difficulty == level ? "circle.inset.filled" : "circle")
                                 .font(.system(size: 18, weight: .bold))
                                 .foregroundStyle(draft.difficulty == level ? SAColor.accent : SAColor.textTertiary)
                             Text(level.displayName)

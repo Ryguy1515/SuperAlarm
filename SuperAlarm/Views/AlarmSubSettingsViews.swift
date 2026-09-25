@@ -14,7 +14,7 @@ struct SnoozeSettingsView: View {
                 VStack(spacing: 16) {
                     SACard(padding: 0) {
                         SARow(icon: "zzz", title: "Allow snooze", showsChevron: false) {
-                            Toggle("", isOn: $snooze.isEnabled)
+                            Toggle("Snooze", isOn: $snooze.isEnabled)
                                 .labelsHidden()
                                 .tint(SAColor.accent)
                         }
@@ -132,7 +132,7 @@ struct WakeUpCheckSettingsView: View {
 
                     SACard(padding: 0) {
                         SARow(icon: "eye.fill", title: "Wake-up check", showsChevron: false) {
-                            Toggle("", isOn: $check.isEnabled)
+                            Toggle("Wake-up check", isOn: $check.isEnabled)
                                 .labelsHidden()
                                 .tint(SAColor.accent)
                         }
@@ -232,7 +232,7 @@ struct PreAlarmSettingsView: View {
 
                     SACard(padding: 0) {
                         SARow(icon: "bell.badge.fill", title: "Pre-alarm", showsChevron: false) {
-                            Toggle("", isOn: $preAlarm.isEnabled)
+                            Toggle("Pre-alarm", isOn: $preAlarm.isEnabled)
                                 .labelsHidden()
                                 .tint(SAColor.accent)
                         }
@@ -333,7 +333,7 @@ struct VoiceBriefingSettingsView: View {
 
                     SACard(padding: 0) {
                         SARow(icon: "waveform.and.mic", title: "Voice briefing", showsChevron: false) {
-                            Toggle("", isOn: $briefing.isEnabled)
+                            Toggle("Voice briefing", isOn: $briefing.isEnabled)
                                 .labelsHidden()
                                 .tint(SAColor.accent)
                         }

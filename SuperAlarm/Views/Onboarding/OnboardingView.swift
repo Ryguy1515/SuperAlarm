@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct OnboardingView: View {
     @EnvironmentObject private var store: AlarmStore
@@ -53,8 +54,8 @@ struct OnboardingView: View {
         ) {
             VStack(spacing: 12) {
                 featureRow("speaker.wave.3.fill", "Extra loud", "Sirens and klaxons that get through a pillow, with the volume forced up.")
-                featureRow("figure.walk", "Wake-up missions", "Solve, scan, walk or shake to switch it off.")
-                featureRow("eye.fill", "Wake-up check", "Comes back if you dismiss it and roll over.")
+                featureRow("figure.walk", "Wake-up missions", "Solve, scan, walk or shake to turn it off.")
+                featureRow("eye.fill", "Wake-up check", "Comes back if you turn it off and roll over.")
             }
         }
     }
@@ -62,8 +63,8 @@ struct OnboardingView: View {
     private var missionsStep: some View {
         stepScaffold(
             icon: "square.grid.2x2.fill",
-            title: "Solve tasks to stop the alarm",
-            body: "Pick a mission that gets you out of bed. The alarm keeps going until it is done — and a follow-up alarm is armed the whole time, so silencing the phone will not save you."
+            title: "Complete a mission to turn off the alarm",
+            body: "Pick a mission that gets you out of bed. The alarm keeps going until it is done — and follow-up alarms are armed the whole time, so silencing the phone or closing the app will not save you."
         ) {
             LazyVGrid(
                 columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
@@ -99,7 +100,7 @@ struct OnboardingView: View {
     private var permissionsStep: some View {
         stepScaffold(
             icon: "checkmark.shield.fill",
-            title: "One permission to grant",
+            title: coordinator.systemBackend?.isSupported == true ? "Two quick permissions" : "One permission to grant",
             body: coordinator.systemBackend?.isSupported == true
                 ? "SuperAlarm uses the system alarm service, the same one the built-in Clock uses. That is what lets it ring through Silent mode, Do Not Disturb and every Focus mode — even if the app is closed or the phone has been restarted."
                 : "This device does not support system alarms, so SuperAlarm needs notification permission and will keep itself running in the background near an alarm."
@@ -112,18 +113,32 @@ struct OnboardingView: View {
                 )
                 permissionStatus("Notifications", granted: coordinator.notificationsAuthorized, available: true)
 
-                Button {
-                    Task {
-                        isRequestingPermissions = true
-                        await coordinator.requestAllAuthorizations()
-                        isRequestingPermissions = false
+                if coordinator.systemAlarmsDenied {
+                    // iOS answers a repeated request silently; the only way
+                    // back is Settings.
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Text("Open iPhone Settings to allow alarms")
                     }
-                } label: {
-                    Text(isRequestingPermissions ? "Asking…" : "Allow alarms")
+                    .buttonStyle(PrimaryButtonStyle())
+                    .padding(.top, 6)
+                } else {
+                    Button {
+                        Task {
+                            isRequestingPermissions = true
+                            await coordinator.requestAllAuthorizations()
+                            isRequestingPermissions = false
+                        }
+                    } label: {
+                        Text(isRequestingPermissions ? "Asking…" : "Allow alarms")
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(isRequestingPermissions)
+                    .padding(.top, 6)
                 }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(isRequestingPermissions)
-                .padding(.top, 6)
 
                 Text("Camera, motion and location are only asked for later, and only if you pick a mission that needs them.")
                     .font(SAFont.body(12))
@@ -156,13 +171,15 @@ struct OnboardingView: View {
                                 .font(SAFont.caption(13))
                                 .foregroundStyle(selected ? SAColor.onAccent : SAColor.textSecondary)
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 40)
+                                .frame(minHeight: 40)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .fill(selected ? SAColor.accent : SAColor.surface)
                                 )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(day.fullName)
+                        .accessibilityAddTraits(selected ? [.isSelected] : [])
                     }
                 }
             }

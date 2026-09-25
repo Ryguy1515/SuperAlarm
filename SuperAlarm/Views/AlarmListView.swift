@@ -1,12 +1,15 @@
 import SwiftUI
+import UIKit
 
 struct AlarmListView: View {
     @EnvironmentObject private var store: AlarmStore
     @EnvironmentObject private var coordinator: AlarmCoordinator
+    @EnvironmentObject private var runtime: AlarmRuntime
 
     @State private var editingAlarm: Alarm?
     @State private var showingQuickAlarm = false
     @State private var showingPermissionHelp = false
+    @State private var alarmPendingDelete: Alarm?
 
     var body: some View {
         NavigationStack {
@@ -61,6 +64,25 @@ struct AlarmListView: View {
                 PermissionHelpView()
                     .environmentObject(coordinator)
             }
+            .confirmationDialog(
+                "Delete this alarm?",
+                isPresented: Binding(get: { alarmPendingDelete != nil }, set: { if !$0 { alarmPendingDelete = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let alarm = alarmPendingDelete { store.delete(alarm) }
+                    alarmPendingDelete = nil
+                }
+            }
+            // An alarm coming due while a sheet is up: the sheet has to go so
+            // the ring cover can present over the root.
+            .onChange(of: runtime.isPresenting) { _, presenting in
+                if presenting {
+                    editingAlarm = nil
+                    showingQuickAlarm = false
+                    showingPermissionHelp = false
+                }
+            }
         }
     }
 
@@ -102,7 +124,11 @@ struct AlarmListView: View {
     // MARK: Permission banner
 
     private var shouldShowPermissionWarning: Bool {
-        !coordinator.notificationsAuthorized && !coordinator.usesSystemAlarms
+        !coordinator.usesSystemAlarms && (!coordinator.notificationsAuthorized || coordinator.systemAlarmsDenied)
+    }
+
+    private var permissionWarningTitle: String {
+        coordinator.systemAlarmsDenied ? "System alarms are turned off" : "Alarms can't ring"
     }
 
     private var permissionBanner: some View {
@@ -114,8 +140,9 @@ struct AlarmListView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(SAColor.danger)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Alarms can't ring")
+                        Text(permissionWarningTitle)
                             .font(SAFont.emphasis(16))
                             .foregroundStyle(SAColor.textPrimary)
                         Text("Permission is off. Tap to fix it.")
@@ -157,12 +184,15 @@ struct AlarmListView: View {
                         Image(systemName: next.alarm.mission.type.symbolName)
                             .font(.system(size: 24, weight: .bold))
                             .foregroundStyle(SAColor.onAccent)
+                            .accessibilityHidden(true)
                         Text(next.alarm.mission.type.displayName)
                             .font(SAFont.caption(11))
                             .foregroundStyle(SAColor.onAccent.opacity(0.75))
+                            .multilineTextAlignment(.center)
                     }
-                    .frame(width: 84)
+                    .frame(minWidth: 84)
                 }
+                .accessibilityElement(children: .combine)
             }
         } else {
             SACard {
@@ -210,7 +240,7 @@ struct AlarmListView: View {
 
             quickActionButton(
                 title: "Weekday set",
-                subtitle: "Mon – Fri",
+                subtitle: "Mon–Fri",
                 icon: "briefcase.fill"
             ) {
                 var alarm = newAlarm()
@@ -237,6 +267,7 @@ struct AlarmListView: View {
                     Image(systemName: icon)
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(SAColor.accent)
+                        .accessibilityHidden(true)
                     Text(title)
                         .font(SAFont.emphasis(15))
                         .foregroundStyle(SAColor.textPrimary)
@@ -247,6 +278,7 @@ struct AlarmListView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Alarm list
@@ -289,11 +321,13 @@ struct AlarmListView: View {
                             }
 
                             Button(role: .destructive) {
-                                store.delete(alarm)
+                                alarmPendingDelete = alarm
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+                        .accessibilityAction(named: "Edit") { editingAlarm = alarm }
+                        .accessibilityAction(named: "Delete") { alarmPendingDelete = alarm }
                 }
             }
         }
@@ -304,9 +338,12 @@ struct AlarmListView: View {
         copy.id = UUID()
         copy.createdAt = Date()
         copy.lastFiredAt = nil
-        // The registered photo belongs to the original; clear it so deleting
-        // one alarm cannot break the other.
-        copy.mission.objectImageID = nil
+        // A registered photo or code belongs to the original alarm; the copy
+        // gets no mission rather than a half-configured one that would slide
+        // straight off at ring time.
+        if copy.mission.type.requiresSetup {
+            copy.mission = MissionSettings()
+        }
         store.add(copy)
     }
 
@@ -342,20 +379,10 @@ struct AlarmRowView: View {
                     }
                 }
 
-                HStack(spacing: 6) {
-                    Text(alarm.displayLabel)
-                        .font(SAFont.body(13))
-                        .foregroundStyle(alarm.isEnabled ? SAColor.textSecondary : SAColor.textTertiary)
-                        .lineLimit(1)
-
-                    Text("·")
-                        .foregroundStyle(SAColor.textTertiary)
-
-                    Text(alarm.repeatDescription)
-                        .font(SAFont.body(13))
-                        .foregroundStyle(alarm.isEnabled ? SAColor.textSecondary : SAColor.textTertiary)
-                        .lineLimit(1)
-                }
+                Text("\(alarm.displayLabel) · \(alarm.repeatDescription)")
+                    .font(SAFont.body(13))
+                    .foregroundStyle(alarm.isEnabled ? SAColor.textSecondary : SAColor.textTertiary)
+                    .lineLimit(2)
 
                 HStack(spacing: 6) {
                     if alarm.mission.type != .none {
@@ -372,7 +399,7 @@ struct AlarmRowView: View {
 
             Spacer(minLength: 4)
 
-            Toggle("", isOn: Binding(
+            Toggle("Alarm at \(alarm.timeString(use24Hour: store.settings.use24HourClock))", isOn: Binding(
                 get: { alarm.isEnabled },
                 set: { newValue in
                     HapticEngine.shared.impact(.light)
@@ -386,6 +413,21 @@ struct AlarmRowView: View {
         .background(SAColor.surface, in: RoundedRectangle(cornerRadius: SAMetrics.cardRadius, style: .continuous))
         .opacity(alarm.isEnabled ? 1 : 0.62)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(rowAccessibilityLabel)
+        .accessibilityHint("Double-tap to edit")
+    }
+
+    private var rowAccessibilityLabel: String {
+        var parts = [
+            "\(alarm.timeString(use24Hour: store.settings.use24HourClock)) \(store.settings.use24HourClock ? "" : alarm.meridiemString)",
+            alarm.displayLabel,
+            alarm.repeatDescription,
+        ]
+        if alarm.mission.type != .none { parts.append("\(alarm.mission.type.displayName) mission") }
+        if alarm.wakeUpCheck.isEnabled { parts.append("wake-up check") }
+        if alarm.skipNextOccurrence { parts.append("skipping next") }
+        return parts.joined(separator: ", ")
     }
 
     private func badge(icon: String, text: String, tint: Color = SAColor.accent) -> some View {
@@ -439,6 +481,14 @@ struct WeatherChip: View {
                         .font(SAFont.caption(13))
                 }
                 .buttonStyle(PillButtonStyle())
+            } else if weather.authorizationStatus == .denied || weather.authorizationStatus == .restricted {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    Link(destination: url) {
+                        Text("Weather needs location — open Settings")
+                            .font(SAFont.caption(13))
+                    }
+                    .buttonStyle(PillButtonStyle())
+                }
             }
         }
         .task {

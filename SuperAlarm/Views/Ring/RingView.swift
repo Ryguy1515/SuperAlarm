@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Container
 
@@ -75,24 +76,38 @@ struct RingContainerView: View {
 /// button press was undone.
 struct VolumeLockBadge: View {
     @ObservedObject private var audio = AlarmAudioEngine.shared
+    @EnvironmentObject private var runtime: AlarmRuntime
     @State private var flash = false
+
+    private var lockAvailable: Bool { SystemVolume.shared.isReady }
 
     var body: some View {
         if audio.isVolumeLocked {
-            HStack(spacing: 6) {
-                Image(systemName: flash ? "speaker.wave.3.fill" : "lock.fill")
-                    .font(.system(size: 12, weight: .bold))
-                Text(flash ? "Volume restored" : "Volume locked")
-                    .font(SAFont.caption(12))
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: flash ? "speaker.wave.3.fill" : (lockAvailable ? "lock.fill" : "lock.open.fill"))
+                        .font(.system(size: 13, weight: .bold))
+                    Text(flash ? "Volume restored" : (lockAvailable ? "Volume locked" : "Volume lock unavailable"))
+                        .font(SAFont.caption(14))
+                }
+                .foregroundStyle(flash ? SAColor.onAccent : SAColor.textPrimary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(flash ? SAColor.accent : SAColor.surface))
+
+                if runtime.phase == .ringing {
+                    Text("Leaving the app won't stop it")
+                        .font(SAFont.caption(13))
+                        .foregroundStyle(SAColor.textSecondary)
+                }
             }
-            .foregroundStyle(flash ? SAColor.ink : SAColor.textSecondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(flash ? SAColor.accent : SAColor.surface))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(flash ? "Volume restored to full" : "Volume is locked; the side buttons will not lower it")
+            .accessibilityLabel(flash
+                ? "Volume restored to full"
+                : (lockAvailable ? "Volume is locked; pressing the side buttons snaps it back up" : "Volume lock unavailable on this phone"))
             .onChange(of: audio.volumeRestoreCount) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { flash = true }
+                AccessibilityNotification.Announcement("Volume restored").post()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                     Task { @MainActor in
                         withAnimation(.easeIn(duration: 0.3)) { flash = false }
@@ -108,6 +123,7 @@ struct VolumeLockBadge: View {
 struct RingView: View {
     @EnvironmentObject private var store: AlarmStore
     @EnvironmentObject private var runtime: AlarmRuntime
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -117,7 +133,8 @@ struct RingView: View {
                 Image(systemName: "alarm.fill")
                     .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(SAColor.accent)
-                    .symbolEffect(.pulse, options: .repeating)
+                    .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                    .accessibilityHidden(true)
 
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Text(clockString(context.date))
@@ -150,6 +167,8 @@ struct RingView: View {
 
             VStack(spacing: 14) {
                 if runtime.canSnooze {
+                    // Muted on purpose: the way off this screen is the
+                    // slider, and snoozing must not look like the main event.
                     Button {
                         HapticEngine.shared.impact(.medium)
                         runtime.snooze()
@@ -158,22 +177,22 @@ struct RingView: View {
                             Text("Snooze")
                             if let interval = snoozeIntervalText {
                                 Text(interval)
-                                    .font(SAFont.caption(12))
-                                    .foregroundStyle(SAColor.onAccent.opacity(0.7))
+                                    .font(SAFont.caption(13))
+                                    .foregroundStyle(SAColor.textSecondary)
                             }
                         }
                     }
-                    .buttonStyle(PrimaryButtonStyle(height: 66))
+                    .buttonStyle(SecondaryButtonStyle(height: 66))
 
                     if let remaining = runtime.snoozesRemainingText {
                         Text(remaining)
-                            .font(SAFont.caption(12))
-                            .foregroundStyle(SAColor.textTertiary)
+                            .font(SAFont.caption(13))
+                            .foregroundStyle(SAColor.textSecondary)
                     }
                 } else if runtime.activeAlarm?.snooze.isEnabled == true {
                     Text("No snoozes left")
-                        .font(SAFont.caption(13))
-                        .foregroundStyle(SAColor.textTertiary)
+                        .font(SAFont.caption(14))
+                        .foregroundStyle(SAColor.textSecondary)
                         .padding(.bottom, 4)
                 }
 
@@ -184,11 +203,11 @@ struct RingView: View {
 
                 if let mission = runtime.activeAlarm?.mission, mission.type != .none {
                     Label(
-                        "\(mission.type.displayName) mission to turn off",
+                        "Complete the \(mission.type.sentenceNoun) mission to turn off",
                         systemImage: mission.type.symbolName
                     )
-                    .font(SAFont.caption(12))
-                    .foregroundStyle(SAColor.textTertiary)
+                    .font(SAFont.caption(14))
+                    .foregroundStyle(SAColor.textSecondary)
                 }
             }
             .padding(.horizontal, SAMetrics.screenPadding)
@@ -248,8 +267,9 @@ struct SlideToUnlock: View {
     @State private var isDragging = false
     @State private var shimmer: CGFloat = -1
 
-    private let thumbSize: CGFloat = 56
-    private let trackHeight: CGFloat = 68
+    private let thumbSize: CGFloat = 60
+    private let trackHeight: CGFloat = 72
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
@@ -285,44 +305,54 @@ struct SlideToUnlock: View {
                         .allowsHitTesting(false)
                     }
 
+                // Accent-filled rather than white: on the cream light theme a
+                // white thumb on a white track was invisible.
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white)
+                    .fill(SAColor.accent)
                     .frame(width: thumbSize, height: thumbSize)
                     .overlay {
                         Image(systemName: "chevron.right.2")
-                            .font(.system(size: 17, weight: .black))
-                            .foregroundStyle(SAColor.ink)
+                            .font(.system(size: 18, weight: .black))
+                            .foregroundStyle(SAColor.onAccent)
                     }
                     .offset(x: offset + 6)
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                isDragging = true
-                                offset = min(max(0, value.translation.width), maxOffset)
-                            }
-                            .onEnded { _ in
-                                isDragging = false
-                                if offset >= maxOffset * 0.88 {
-                                    offset = maxOffset
-                                    onUnlock()
-                                } else {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                        offset = 0
-                                    }
-                                }
-                            }
-                    )
+                    .allowsHitTesting(false)
             }
             .frame(height: trackHeight)
+            .contentShape(Rectangle())
+            // The whole track takes the drag, seeded from where the finger
+            // landed, so a thumb that starts a little off the knob still works.
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isDragging = true
+                        let grabOffset = max(0, min(value.startLocation.x - thumbSize / 2 - 6, maxOffset))
+                        let seed = value.startLocation.x > thumbSize + 12 ? 0 : grabOffset
+                        offset = min(max(0, seed + value.translation.width), maxOffset)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                        if offset >= maxOffset * 0.88 {
+                            offset = maxOffset
+                            onUnlock()
+                        } else {
+                            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.7)) {
+                                offset = 0
+                            }
+                        }
+                    }
+            )
         }
         .frame(height: trackHeight)
         .onAppear {
+            guard !reduceMotion else { return }
             withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) {
                 shimmer = 1.4
             }
         }
         .accessibilityElement()
         .accessibilityLabel(title)
+        .accessibilityHint("Double-tap to \(title.lowercased().replacingOccurrences(of: "slide to ", with: ""))")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onUnlock() }
     }
@@ -341,6 +371,7 @@ struct SnoozeView: View {
             Image(systemName: "zzz")
                 .font(.system(size: 54, weight: .bold))
                 .foregroundStyle(SAColor.accent)
+                .accessibilityHidden(true)
 
             Text("Snoozing")
                 .font(SAFont.title(28))
@@ -350,24 +381,34 @@ struct SnoozeView: View {
                 VStack(spacing: 6) {
                     Text(countdown(to: ends))
                         .font(SAFont.clock(56))
-                        .foregroundStyle(SAColor.accent)
+                        .foregroundStyle(SAColor.accentText)
                     Text("until it rings again")
                         .font(SAFont.body(15))
                         .foregroundStyle(SAColor.textSecondary)
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Time until it rings again")
+                .accessibilityValue(countdown(to: ends))
+                .accessibilityAddTraits(.updatesFrequently)
             }
 
             Text("Snoozed \(runtime.snoozeCount)×")
-                .font(SAFont.caption(13))
-                .foregroundStyle(SAColor.textTertiary)
+                .font(SAFont.caption(14))
+                .foregroundStyle(SAColor.textSecondary)
 
             Spacer()
 
-            Button("Wake up now") {
-                HapticEngine.shared.impact(.medium)
-                runtime.wakeNow()
+            VStack(spacing: 8) {
+                Button("Ring now") {
+                    HapticEngine.shared.impact(.medium)
+                    runtime.wakeNow()
+                }
+                .buttonStyle(PrimaryButtonStyle(height: 66))
+
+                Text("The mission still applies.")
+                    .font(SAFont.caption(13))
+                    .foregroundStyle(SAColor.textSecondary)
             }
-            .buttonStyle(SecondaryButtonStyle())
             .padding(.horizontal, SAMetrics.screenPadding)
             .padding(.bottom, 30)
         }
@@ -394,8 +435,8 @@ struct WakeCheckView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
-            Text("Please confirm you're awake by tapping the button below. If you don't respond within \(runtime.activeAlarm?.wakeUpCheck.confirmWindowSeconds ?? 100) seconds, the alarm will ring again.")
-                .font(SAFont.body(16))
+            Text("Tap I'm up within \(runtime.activeAlarm?.wakeUpCheck.confirmWindowSeconds ?? 100) seconds or the alarm rings again.")
+                .font(SAFont.body(17))
                 .foregroundStyle(SAColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 30)
@@ -410,6 +451,10 @@ struct WakeCheckView: View {
                     .contentTransition(.numericText(countsDown: true))
                     .animation(.snappy, value: runtime.wakeCheckSecondsRemaining)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Seconds to confirm")
+            .accessibilityValue("\(runtime.wakeCheckSecondsRemaining)")
+            .accessibilityAddTraits(.updatesFrequently)
 
             Spacer(minLength: 10)
 

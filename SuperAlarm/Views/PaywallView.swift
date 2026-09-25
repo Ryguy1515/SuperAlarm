@@ -131,7 +131,7 @@ struct PaywallView: View {
         VStack(spacing: 10) {
             benefit("square.grid.2x2.fill", "All \(MissionType.selectable.count) missions", "Face ID and Math are free; the rest are Pro.")
             benefit("speaker.wave.3.fill", "\(SoundCatalog.all.count) alarm sounds", "Plus your own imported audio and randomised tones.")
-            benefit("eye.fill", "Wake-up check", "The feature that stops you dismissing and rolling over.")
+            benefit("eye.fill", "Wake-up check", "The feature that stops you turning it off and rolling over.")
             benefit("chart.bar.fill", "Streaks and history", "See how hard you actually fought your alarm.")
             benefit("rectangle.on.rectangle.slash", "No ads", "Nothing to swipe past at six in the morning.")
         }
@@ -166,7 +166,7 @@ struct PaywallView: View {
                     selected = tier
                 } label: {
                     HStack(spacing: 14) {
-                        Image(systemName: selected == tier ? "largecircle.fill.circle" : "circle")
+                        Image(systemName: selected == tier ? "circle.inset.filled" : "circle")
                             .font(.system(size: 20, weight: .bold))
                             .foregroundStyle(selected == tier ? SAColor.accent : SAColor.textTertiary)
 
@@ -206,6 +206,8 @@ struct PaywallView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(selected == tier ? [.isSelected] : [])
             }
         }
     }

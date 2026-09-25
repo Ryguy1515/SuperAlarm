@@ -84,35 +84,60 @@ public enum SAColor {
 // MARK: - Typography
 
 /// SF Pro Rounded at heavy weights stands in for the geometric display face,
-/// with no font files to bundle and full Dynamic Type support.
+/// with no font files to bundle.
+///
+/// Every role scales with Dynamic Type through `UIFontMetrics`, so the base
+/// sizes below are what the user sees at the default setting. The clock and
+/// display roles are capped: a 76 pt clock at the largest accessibility size
+/// would not fit the screen, and a number that overflows helps nobody.
 public enum SAFont {
+    #if canImport(UIKit)
+    private static func scaled(
+        _ size: CGFloat,
+        _ style: UIFont.TextStyle,
+        _ weight: Font.Weight,
+        cap: UIContentSizeCategory? = nil
+    ) -> Font {
+        var traits = UITraitCollection.current
+        if let cap, traits.preferredContentSizeCategory > cap {
+            traits = UITraitCollection(preferredContentSizeCategory: cap)
+        }
+        let points = UIFontMetrics(forTextStyle: style).scaledValue(for: size, compatibleWith: traits)
+        return .system(size: points, weight: weight, design: .rounded)
+    }
+    #else
+    private static func scaled(_ size: CGFloat, _ style: Int, _ weight: Font.Weight, cap: Int? = nil) -> Font {
+        .system(size: size, weight: weight, design: .rounded)
+    }
+    #endif
+
     public static func display(_ size: CGFloat = 40) -> Font {
-        .system(size: size, weight: .black, design: .rounded)
+        scaled(size, .largeTitle, .black, cap: .accessibilityLarge)
     }
 
     public static func title(_ size: CGFloat = 26) -> Font {
-        .system(size: size, weight: .heavy, design: .rounded)
+        scaled(size, .title2, .heavy)
     }
 
     public static func headline(_ size: CGFloat = 19) -> Font {
-        .system(size: size, weight: .bold, design: .rounded)
+        scaled(size, .headline, .bold)
     }
 
     public static func body(_ size: CGFloat = 16) -> Font {
-        .system(size: size, weight: .medium, design: .rounded)
+        scaled(size, .body, .medium)
     }
 
     public static func emphasis(_ size: CGFloat = 16) -> Font {
-        .system(size: size, weight: .semibold, design: .rounded)
+        scaled(size, .body, .semibold)
     }
 
     public static func caption(_ size: CGFloat = 13) -> Font {
-        .system(size: size, weight: .semibold, design: .rounded)
+        scaled(size, .caption1, .semibold)
     }
 
     /// Monospaced digits so the clock does not jitter as numbers change.
     public static func clock(_ size: CGFloat = 64) -> Font {
-        .system(size: size, weight: .black, design: .rounded).monospacedDigit()
+        scaled(size, .largeTitle, .black, cap: .accessibilityMedium).monospacedDigit()
     }
 }
 
@@ -141,14 +166,18 @@ public struct PrimaryButtonStyle: ButtonStyle {
         self.height = height
     }
 
+    @Environment(\.isEnabled) private var isEnabled
+
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(SAFont.headline(18))
             .foregroundStyle(foreground)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
             .frame(maxWidth: .infinity)
-            .frame(height: height)
+            .frame(minHeight: height)
             .background(tint, in: RoundedRectangle(cornerRadius: SAMetrics.buttonRadius, style: .continuous))
-            .opacity(configuration.isPressed ? 0.82 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.45)
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -162,13 +191,33 @@ public struct SecondaryButtonStyle: ButtonStyle {
         self.height = height
     }
 
+    @Environment(\.isEnabled) private var isEnabled
+
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(SAFont.headline(17))
             .foregroundStyle(SAColor.textPrimary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
             .frame(maxWidth: .infinity)
-            .frame(height: height)
+            .frame(minHeight: height)
             .background(SAColor.surfaceElevated, in: RoundedRectangle(cornerRadius: SAMetrics.buttonRadius, style: .continuous))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Muted red pill for the one destructive action on a screen.
+public struct DestructiveButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(SAFont.emphasis(16))
+            .foregroundStyle(SAColor.danger)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: SAMetrics.buttonHeight)
+            .background(SAColor.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: SAMetrics.buttonRadius, style: .continuous))
             .opacity(configuration.isPressed ? 0.75 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
@@ -284,6 +333,7 @@ public struct SARow<Trailing: View>: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(iconTint)
             }
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -427,6 +477,7 @@ public struct SABigStepper: View {
                 stepButton(symbol: "minus", enabled: value > range.lowerBound) {
                     value = max(range.lowerBound, value - step)
                 }
+                .accessibilityLabel("Decrease")
 
                 Text("\(value)")
                     .font(SAFont.display(52))
@@ -434,10 +485,13 @@ public struct SABigStepper: View {
                     .frame(minWidth: 130)
                     .contentTransition(.numericText())
                     .animation(.snappy(duration: 0.2), value: value)
+                    .accessibilityLabel(caption ?? "Value")
+                    .accessibilityValue("\(value)")
 
                 stepButton(symbol: "plus", enabled: value < range.upperBound) {
                     value = min(range.upperBound, value + step)
                 }
+                .accessibilityLabel("Increase")
             }
         }
     }

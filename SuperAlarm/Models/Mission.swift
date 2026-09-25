@@ -32,7 +32,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .walk: return "Walk"
         case .faceID: return "Face ID"
         case .objectScan: return "Object scan"
-        case .barcode: return "QR/Barcode Scan"
+        case .barcode: return "Barcode scan"
         case .shake: return "Shake"
         case .memory: return "Memory"
         case .squat: return "Squat"

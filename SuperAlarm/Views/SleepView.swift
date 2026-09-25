@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SleepView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var store: AlarmStore
     @StateObject private var player = SleepSoundPlayer.shared
 
@@ -66,7 +67,7 @@ struct SleepView: View {
                         if let sleep = sleepDurationText(next.date) {
                             Text(sleep)
                                 .font(SAFont.caption(13))
-                                .foregroundStyle(SAColor.accent)
+                                .foregroundStyle(SAColor.accentText)
                                 .padding(.top, 2)
                         }
                     }
@@ -112,7 +113,8 @@ struct SleepView: View {
                 Image(systemName: "waveform")
                     .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(player.isPlaying ? SAColor.accent : SAColor.textTertiary)
-                    .symbolEffect(.variableColor, options: .repeating, isActive: player.isPlaying)
+                    .symbolEffect(.variableColor, options: .repeating, isActive: player.isPlaying && !reduceMotion)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(selected?.name ?? "No sound selected")
@@ -137,6 +139,7 @@ struct SleepView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(selected == nil)
+                .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
             }
         }
     }
@@ -185,7 +188,7 @@ struct SleepView: View {
             }
             .foregroundStyle(isSelected ? SAColor.onAccent : SAColor.textSecondary)
             .frame(maxWidth: .infinity)
-            .frame(height: 88)
+            .frame(minHeight: 88)
             .background(
                 RoundedRectangle(cornerRadius: SAMetrics.tileRadius, style: .continuous)
                     .fill(isSelected ? SAColor.accent : SAColor.surface)
@@ -207,7 +210,8 @@ struct SleepView: View {
             VStack(spacing: 8) {
                 Image(systemName: sound.symbolName)
                     .font(.system(size: 22, weight: .bold))
-                    .symbolEffect(.variableColor, options: .repeating, isActive: isPlaying)
+                    .symbolEffect(.variableColor, options: .repeating, isActive: isPlaying && !reduceMotion)
+                    .accessibilityHidden(true)
                 Text(sound.name)
                     .font(SAFont.caption(12))
                     .lineLimit(2)
@@ -216,7 +220,7 @@ struct SleepView: View {
             }
             .foregroundStyle(isSelected ? SAColor.onAccent : SAColor.textSecondary)
             .frame(maxWidth: .infinity)
-            .frame(height: 88)
+            .frame(minHeight: 88)
             .background(
                 RoundedRectangle(cornerRadius: SAMetrics.tileRadius, style: .continuous)
                     .fill(isSelected ? SAColor.accent : SAColor.surface)
@@ -237,7 +241,7 @@ struct SleepView: View {
                     Spacer()
                     Text(store.settings.sleepSound.durationLabel)
                         .font(SAFont.emphasis(16))
-                        .foregroundStyle(SAColor.accent)
+                        .foregroundStyle(SAColor.accentText)
                 }
 
                 Picker("Duration", selection: $store.settings.sleepSound.durationMinutes) {

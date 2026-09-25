@@ -2,6 +2,7 @@ import SwiftUI
 
 /// One-tap countdown alarm for naps and short reminders.
 struct QuickAlarmView: View {
+    @State private var didSubmit = false
     @EnvironmentObject private var store: AlarmStore
     @Environment(\.dismiss) private var dismiss
 
@@ -38,6 +39,7 @@ struct QuickAlarmView: View {
                     Spacer()
                     Button("Set alarm for \(ringsAtText)") { createAlarm() }
                         .buttonStyle(PrimaryButtonStyle())
+                        .disabled(didSubmit)
                         .padding(.horizontal, SAMetrics.screenPadding)
                         .padding(.bottom, 14)
                         .background(
@@ -66,7 +68,7 @@ struct QuickAlarmView: View {
             VStack(spacing: 6) {
                 Text("\(minutes)")
                     .font(SAFont.display(64))
-                    .foregroundStyle(SAColor.accent)
+                    .foregroundStyle(SAColor.accentText)
                     .contentTransition(.numericText())
                     .animation(.snappy, value: minutes)
                 Text(minutes == 1 ? "minute from now" : "minutes from now")
@@ -156,6 +158,9 @@ struct QuickAlarmView: View {
     }
 
     private func createAlarm() {
+        // Two fast taps before the sheet finishes dismissing made two alarms.
+        guard !didSubmit else { return }
+        didSubmit = true
         var alarm = Alarm.quick(
             minutesFromNow: minutes,
             label: label.isEmpty ? "Quick alarm" : label
