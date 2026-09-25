@@ -30,7 +30,10 @@ const PORTABLE_SOURCES = [
   'SuperAlarm/Models/AppSettings.swift',
   'SuperAlarm/Models/WakeRecord.swift',
   'SuperAlarm/Missions/CognitiveMissions.swift',
+  'SuperAlarm/Missions/StepCountModel.swift',
   'SuperAlarm/Audio/SoundCatalog.generated.swift',
+  'SuperAlarm/Audio/VolumeLockPolicy.swift',
+  'SuperAlarm/Scheduling/BackstopPolicy.swift',
 ];
 
 /**
@@ -54,12 +57,30 @@ const EXCLUDED_TESTS = new Set([
   'testFiringARepeatingAlarmLeavesItOn',
   'testScheduleInvalidationFiresOnEveryMutation',
   'testNextAlarmIgnoresDisabledOnes',
+  // ReliabilityTests: these reach the runtime, the session or the file
+  // store, none of which are in the portable set.
+  'testASessionResumesFromPersistedRoundsAndReportsProgress',
+  'testResumedRoundsAreClampedToTheConfiguredTotal',
+  'testATimeLimitAccountsForTimeAlreadySpent',
+  'testFileStoreReadsWholeSecondDatesWrittenByTheFirstBuild',
+  'testFileStoreMovesAMalformedFileAsideAndRemembersIt',
+  'testFileStoreDistinguishesAbsentFromUnreadable',
+  'testFileStoreRoundTripsThroughSaveNow',
+  'testAFreshRingResumesRingingWithAudio',
+  'testAMissionInProgressResumesTheMissionNotTheRing',
+  'testStateOlderThanTheWindowIsDiscarded',
+  'testASnoozeIsJudgedByItsEndNotTheOriginalFireTime',
+  'testWakeCheckPhasesResume',
+  'testIdleStateIsNothingAndAFutureFireDateIsDiscarded',
+  'testAStateFileMissingOptionalKeysOrWithAnUnknownPhaseStillResumes',
+  'testOlderStateFilesWithoutMissionFieldsStillDecode',
 ]);
 
 const TEST_SOURCES = [
   'SuperAlarmTests/AlarmSchedulingTests.swift',
   'SuperAlarmTests/MissionLogicTests.swift',
   'SuperAlarmTests/StatisticsAndPersistenceTests.swift',
+  'SuperAlarmTests/ReliabilityTests.swift',
 ];
 
 // ------------------------------------------------------------------ helpers

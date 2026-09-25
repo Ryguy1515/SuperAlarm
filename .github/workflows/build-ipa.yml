@@ -19,7 +19,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only pull requests cancel their predecessor. On main every push builds
+  # to completion, so a red final push never leaves the previous artifact
+  # half-built.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -123,6 +126,20 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee build/test.log
 
+      # `xcodebuild test` exits 0 on "Executed 0 tests", so a scheme or
+      # XcodeGen change that silently dropped the test bundle would make a
+      # green run mean nothing. Insist that a plausible number ran.
+      - name: Check the tests actually ran
+        run: |
+          set -euo pipefail
+          SUMMARY=$(grep -oE 'Executed [0-9]+ tests?, with [0-9]+ failures?' build/test.log | tail -n 1 || true)
+          echo "Test summary: ${SUMMARY:-none found}"
+          COUNT=$(printf '%s' "$SUMMARY" | grep -oE 'Executed [0-9]+' | grep -oE '[0-9]+' || echo 0)
+          if [ "${COUNT:-0}" -lt 100 ]; then
+            echo "::error title=Tests did not run::Only ${COUNT:-0} tests executed; expected at least 100"
+            exit 1
+          fi
+
       # ------------------------------------------------------------ archive
       - name: Build unsigned device archive
         run: |
@@ -219,13 +236,22 @@ jobs:
           APP="build/check/Payload/SuperAlarm.app"
 
           echo "--- Info.plist keys that matter ---"
-          for key in NSAlarmKitUsageDescription UIBackgroundModes NSCameraUsageDescription NSMotionUsageDescription NSFaceIDUsageDescription; do
+          for key in NSAlarmKitUsageDescription UIBackgroundModes NSCameraUsageDescription NSMotionUsageDescription NSFaceIDUsageDescription NSLocationWhenInUseUsageDescription NSSupportsLiveActivities; do
             if /usr/libexec/PlistBuddy -c "Print :$key" "$APP/Info.plist" >/dev/null 2>&1; then
               echo "ok   $key"
             else
               echo "MISSING $key"; exit 1
             fi
           done
+          /usr/libexec/PlistBuddy -c "Print :UIBackgroundModes" "$APP/Info.plist" | grep -q audio \
+            || { echo "UIBackgroundModes does not include audio"; exit 1; }
+
+          echo "--- Architecture ---"
+          lipo -info "$APP/SuperAlarm"
+          lipo -info "$APP/SuperAlarm" | grep -q arm64 || { echo "Binary is not arm64"; exit 1; }
+          if lipo -info "$APP/SuperAlarm" | grep -qE 'x86_64|simulator'; then
+            echo "Binary contains a simulator slice"; exit 1
+          fi
 
           echo "--- Alarm tones present at bundle root ---"
           # UNNotificationSound only looks at the bundle root, so a tone tucked

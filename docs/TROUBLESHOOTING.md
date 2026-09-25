@@ -54,6 +54,9 @@ Enable **Settings → Privacy & Security → Developer Mode**, then restart the 
 **Diagnostics says "Notifications" instead of "AlarmKit".**
 You're below iOS 26, or the alarm permission was declined. On iOS 26+, go to **Settings → Diagnostics → Permissions** in the app and grant it. Without AlarmKit the alarm cannot break through Silent mode — turn **Background keep-alive** on in Settings and leave the ringer on.
 
+**It didn't break through a Focus mode or Sleep Focus.**
+On iOS 26 the system alarm and its follow-ups always break through; that is what AlarmKit is for. The *notifications* — the repeat chain, the still-ringing reminders, the wake-up check — are marked time-sensitive, but without Apple's time-sensitive entitlement (which free signing cannot include) iOS may treat them as ordinary notifications and hold them during a Focus. On iOS 17 and 18, where notifications are the only mechanism, allow SuperAlarm in your Sleep Focus (**Settings → Focus → Sleep → Apps**) or the chain will be muted exactly when you need it.
+
 **The alarm didn't go off at all.**
 Check, in this order:
 1. **Diagnostics** — is the alarm mechanism authorised, and does *Next alarm* show the time you expect?

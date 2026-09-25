@@ -22,7 +22,7 @@ The premise of the original is an *adversarial* model of the half-asleep user: i
 
 ### The ten missions
 
-Math · Memory · QR/Barcode scan · Object scan · Face ID · Walk · Push-up · Squat · Shake · Typing
+Math · Memory · Barcode scan · Object scan · Face ID · Walk · Push-up · Squat · Shake · Typing
 
 Every mission has difficulty tiers or a numeric goal, optional multiple rounds, an optional time limit, and — critically — an **escape hatch**. After a configurable delay a "Can't complete this?" option appears; hold a button and type *"I give up"* and the alarm stops. The most common one-star review in this entire app category is a mission that won't recognise the user, leaving them trapped with a screaming phone. Waking up should be hard, never impossible.
 
@@ -91,7 +91,7 @@ If signing fails because of the widget, use `SuperAlarm-no-widget.ipa`.
 Do this the evening before you first rely on it.
 
 1. **Settings → Diagnostics.** Confirm *Alarm mechanism* reads **AlarmKit** (iOS 26+) or **Notifications**, that authorisation says Yes, and that *Bundled sounds* says **All present**.
-2. **Test the whole flow without waiting.** Open an alarm → **Test this alarm now**. The ring screen appears, the mission runs, the wake-up check follows.
+2. **Test the whole flow without waiting.** Open an alarm → **Save and test now**. The ring screen appears, the mission runs, the wake-up check follows.
 3. **Test it for real while backgrounded.** Set an alarm 2 minutes out, lock the phone, put it face down, wait.
 4. **Test the defences.** While it rings, press the volume-down button — the sound dips for a moment and comes straight back, and the ring screen flashes *Volume restored*. Swipe home — it keeps ringing and a *still ringing* notification lands within seconds. Force-quit it from the app switcher — a *Still asleep?* alarm lands within about 30 seconds, and reopening the app puts you back on the ring screen with the mission still owed.
 5. **Test silent mode.** Flip the ringer switch to silent and repeat step 3.
@@ -175,7 +175,7 @@ This project was written on Windows, where no Swift compiler can run: Swift for 
 
 Each was validated against deliberately broken code to confirm it actually fires rather than passing vacuously.
 
-**In CI, with a real compiler** — the actual build, and 71 unit tests covering scheduling maths, mission generators, statistics and streaks, and persistence migration from older records.
+**In CI, with a real compiler** — the actual build, and the unit tests (well over a hundred) covering scheduling maths, the due-alarm and restore decisions, the backstop chain rules, the volume lock and step-count models, mission generators, statistics and streaks, the file store, and persistence migration from older records. The workflow fails if fewer than a hundred tests execute, so a green run cannot mean "no tests ran".
 
 `tools/core-tests.js` assembles the platform-independent core (models, mission generators, statistics) into a throwaway SwiftPM package and runs the portable subset of the test suite. It needs a Swift toolchain and MSVC, so it does nothing on a bare Windows box — it exists for anyone who has those, or on Linux.
 
