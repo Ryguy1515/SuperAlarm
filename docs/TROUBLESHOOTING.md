@@ -72,6 +72,15 @@ Open the alarm's Sound screen and confirm **Override device volume** is on and t
 **Volume buttons kill the alarm.**
 Expected on iOS 26 for the *system* alert: Apple made any physical button dismiss an alerting AlarmKit alarm. That's precisely why **backstop alarms** are armed together with every alarm — the first lands 30 seconds later and they keep coming until the mission is genuinely completed. Once the app is open and ringing, the side buttons only lower the volume for a frame; the volume lock puts it straight back and the ring screen shows *Volume restored*. (The system volume HUD does not appear inside the app; that is a side effect of the volume control, not a sign the buttons are being ignored.)
 
+**The alarm came out of my headphones or a Bluetooth speaker.**
+Expected. The app plays through whatever audio route is active, and iOS gives no way to force the built-in speaker for alarm-style playback. Take the headphones off or turn the speaker off before bed. Unplugging wired headphones mid-alarm is handled: playback carries on through the speaker.
+
+**No vibration on silent.**
+iOS only vibrates on silent if **Settings → Sounds & Haptics → Play Haptics in Silent Mode** is on. On iOS 26 the system alarm vibrates regardless.
+
+**My shake or push-up count reset after the app was killed.**
+The walk mission resumes its step count after a relaunch because the pedometer can be asked for the whole mission window; shakes, reps and camera reps are counted live and start again from zero. The mission itself is still owed — the alarm does not reset.
+
 **A mission won't recognise me.**
 Wait for the **"Can't complete this?"** link at the bottom of the mission screen (it appears after a couple of minutes, configurable per alarm), hold the button and type *"I give up"*. The alarm stops. Then switch that alarm to a deterministic mission — Math, Face ID, Barcode or Walk are far more reliable than camera-based object recognition in a dark bedroom.
 
