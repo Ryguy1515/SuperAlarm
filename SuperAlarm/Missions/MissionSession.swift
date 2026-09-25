@@ -16,6 +16,10 @@ public final class MissionSession: ObservableObject {
     @Published public private(set) var secondsRemaining: Int?
     /// Set when the time limit ran out.
     @Published public private(set) var didTimeOut = false
+    /// True when the mission cannot be attempted at all — a sensor or
+    /// permission is missing — so the escape hatch must be offered at once
+    /// rather than after the configured delay.
+    @Published public private(set) var isBlocked = false
 
     /// Raised when the mission is finished successfully.
     public var onComplete: (() -> Void)?
@@ -24,6 +28,8 @@ public final class MissionSession: ObservableObject {
     /// Raised after every passed round with the new total, so the runtime
     /// can persist progress for a relaunch.
     public var onProgress: ((Int) -> Void)?
+    /// Raised on every wrong answer, so the wake record counts them.
+    public var onFailure: (() -> Void)?
 
     private var timer: Timer?
 
@@ -114,6 +120,14 @@ public final class MissionSession: ObservableObject {
         guard !isComplete else { return }
         failures += 1
         HapticEngine.shared.failure()
+        onFailure?()
+    }
+
+    /// The mission view found it cannot run (permission denied, no sensor,
+    /// reference photo missing). Unblocking is allowed — a permission
+    /// granted mid-mission puts the mission back in play.
+    public func setBlocked(_ blocked: Bool) {
+        isBlocked = blocked
     }
 
     /// Completes everything at once — used by the emergency exit when a

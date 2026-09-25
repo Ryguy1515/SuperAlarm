@@ -78,7 +78,7 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .none: return "Turn the alarm off with a single slide."
         case .math: return "Solve arithmetic to shake off the fog."
-        case .pushup: return "Prop the phone up. The camera counts your reps."
+        case .pushup: return "Prop the phone up side on. The camera counts your reps."
         case .walk: return "Get out of bed and take some steps."
         case .faceID: return "Scan your face to prove you sat up."
         case .objectScan: return "Photograph a registered object across the room."
@@ -94,11 +94,11 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
     public var explanation: String {
         switch self {
         case .none:
-            return "The alarm can be dismissed straight from the ring screen."
+            return "The alarm can be turned off straight from the ring screen."
         case .math:
-            return "Solve a set of arithmetic problems. Harder difficulties use larger numbers and more operations, which forces genuine mental effort rather than muscle memory."
+            return "Solve a set of arithmetic problems. Harder difficulties use larger numbers and more operations, which takes genuine mental effort rather than muscle memory."
         case .pushup:
-            return "Prop the phone up facing you and the camera counts your reps on screen, tracking your shoulder, elbow and wrist. Half-reps do not register. You can switch to motion sensors instead if you would rather pocket the phone."
+            return "Prop the phone up a couple of metres away, side on. The camera tracks your shoulder, elbow and wrist and counts reps on screen; half-reps do not register. You can switch to motion sensors instead if you would rather pocket the phone."
         case .walk:
             return "The step counter runs until you hit your goal. Leaving the bed is the entire point, so pick a number that gets you out of the room."
         case .faceID:
@@ -112,9 +112,9 @@ public enum MissionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .memory:
             return "A pattern of tiles lights up. Reproduce it from memory. Larger grids and longer sequences make this genuinely demanding."
         case .squat:
-            return "Prop the phone up facing you and the camera counts your reps on screen, tracking your hip, knee and ankle. Depth matters — shallow squats do not register."
+            return "Prop the phone up a couple of metres away, side on. The camera tracks your hip, knee and ankle and counts reps on screen; shallow squats do not register."
         case .typing:
-            return "Type the phrase exactly, including punctuation. Typos reset the current phrase."
+            return "Type the phrase exactly, including punctuation. The field turns red on the first wrong character."
         }
     }
 
@@ -326,7 +326,7 @@ public enum RepDetection: String, Codable, CaseIterable, Identifiable, Sendable 
     public var detail: String {
         switch self {
         case .camera:
-            return "Prop the phone up facing you. It tracks your joints and counts reps on screen — nothing to hold or wear."
+            return "Prop the phone up a couple of metres away, side on. It tracks your joints and counts reps on screen — nothing to hold or wear."
         case .motion:
             return "Counts movement of the phone itself, so it must travel with your body. Works in the dark, but you have to hold or pocket it."
         }

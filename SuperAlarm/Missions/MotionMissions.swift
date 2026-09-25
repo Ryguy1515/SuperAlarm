@@ -349,7 +349,9 @@ public final class MotionMissionEngine: ObservableObject {
 
         availability = .ready
         isRunning = true
-        hint = kind == .squat ? "Stand up straight to begin" : "Get into position"
+        hint = kind == .squat
+            ? "Hold the phone or pocket it, then stand up straight to begin"
+            : "Hold the phone or pocket it, then get into position"
 
         motionManager.deviceMotionUpdateInterval = 1.0 / 50.0
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in

@@ -43,10 +43,10 @@ struct MissionPickerView: View {
     private var intro: some View {
         SACard {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Solve tasks to stop the alarm")
+                Text("Complete a mission to turn off the alarm")
                     .font(SAFont.title(20))
                     .foregroundStyle(SAColor.textPrimary)
-                Text("A mission has to be completed before the alarm will switch off. Pick something that gets you out of bed rather than something you can do half asleep.")
+                Text("A mission has to be completed before the alarm will turn off. Pick something that gets you out of bed rather than something you can do half asleep.")
                     .font(SAFont.body(14))
                     .foregroundStyle(SAColor.textSecondary)
             }
@@ -186,7 +186,8 @@ struct MissionConfigView: View {
                 settings: draft,
                 isPreview: true,
                 onComplete: { showingPreview = false },
-                onGiveUp: { showingPreview = false }
+                onGiveUp: { showingPreview = false },
+                onTimeout: { showingPreview = false }
             )
         }
         .fullScreenCover(isPresented: $showingBarcodeRegistration) {
@@ -464,7 +465,7 @@ struct MissionConfigView: View {
                     Text("Escape hatch")
                         .font(SAFont.emphasis(16))
                         .foregroundStyle(SAColor.textPrimary)
-                    Text("If the mission will not recognise you, an escape appears after this long: hold a button and type \"\(MissionSettings.escapeHatchPhrase)\". Waking up should be hard, never impossible.")
+                    Text("If the mission will not recognise you, an escape appears after this long: type \"\(MissionSettings.escapeHatchPhrase)\", then hold a button. Waking up should be hard, never impossible.")
                         .font(SAFont.body(12))
                         .foregroundStyle(SAColor.textSecondary)
                     Picker("Escape hatch", selection: $draft.escapeHatchAfterSeconds) {

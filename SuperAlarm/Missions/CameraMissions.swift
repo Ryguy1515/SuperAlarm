@@ -40,10 +40,29 @@ public class CaptureController: NSObject, ObservableObject {
     let log = Logger(subsystem: "io.superalarm", category: "camera")
 
     private var isConfigured = false
+    private var device: AVCaptureDevice?
+
+    /// True while the torch is on. Only the back camera has one.
+    @Published public private(set) var isTorchOn = false
+    public var hasTorch: Bool { device?.hasTorch ?? false }
 
     /// Subclasses attach their outputs here, from inside the session's
     /// configuration transaction.
     func configureOutputs() {}
+
+    /// Lights the scene for a 6am object scan. Ignored on cameras without a
+    /// torch, and switched off with the session.
+    public func setTorch(_ on: Bool) {
+        guard let device, device.hasTorch else { return }
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = on ? .on : .off
+            device.unlockForConfiguration()
+            isTorchOn = on
+        } catch {
+            log.error("Torch: \(String(describing: error), privacy: .public)")
+        }
+    }
 
     /// Which camera to open. Scanning missions point away from you; pose
     /// missions point at you.
@@ -79,6 +98,7 @@ public class CaptureController: NSObject, ObservableObject {
     }
 
     public func stop() {
+        if isTorchOn { setTorch(false) }
         let session = self.session
         sessionQueue.async {
             if session.isRunning { session.stopRunning() }
@@ -91,6 +111,10 @@ public class CaptureController: NSObject, ObservableObject {
     private func configureSession() -> Bool {
         session.beginConfiguration()
         session.sessionPreset = preset
+        // The alarm owns the audio session. Left at its default the capture
+        // session reconfigures it when the camera opens, which could undo
+        // the playback category the siren depends on.
+        session.automaticallyConfiguresApplicationAudioSession = false
 
         guard
             let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: cameraPosition)
@@ -103,6 +127,7 @@ public class CaptureController: NSObject, ObservableObject {
             return false
         }
         session.addInput(input)
+        self.device = device
 
         configureOutputs()
         session.commitConfiguration()
@@ -204,21 +229,92 @@ public final class ObjectMissionController: CaptureController, AVCaptureVideoDat
 
     /// Feature-print distance under which the object counts as recognised.
     /// Vision distances run roughly 0 (identical) to ~2 (unrelated).
-    public var matchDistanceThreshold: Float = 0.62
+    public var matchDistanceThreshold: Float = 0.62 {
+        didSet { scan.threshold = matchDistanceThreshold }
+    }
 
     public var onMatch: (() -> Void)?
     /// Registration mode captures a reference instead of matching one.
     public var onCapturedReference: ((Data) -> Void)?
-    public var isRegistrationMode = false
+    public var isRegistrationMode = false {
+        didSet { scan.isRegistrationMode = isRegistrationMode }
+    }
 
     private let videoOutput = AVCaptureVideoDataOutput()
-    private var referencePrint: VNFeaturePrintObservation?
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private var lastSampleAt: Date = .distantPast
-    private var wantsReferenceCapture = false
-    /// Require a few consecutive good frames so a lucky frame cannot pass.
-    private var consecutiveGoodFrames = 0
-    private let requiredGoodFrames = 3
+    /// Everything the frame callback needs, guarded by a lock so the
+    /// expensive work stays on the capture queue and only results reach the
+    /// main actor. Rendering and feature printing every frame on the main
+    /// thread stuttered the UI and starved the capture pool.
+    private let scan = ScanState()
+
+    private final class ScanState: @unchecked Sendable {
+        let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+        private let lock = NSLock()
+        private var _threshold: Float = 0.62
+        private var _referencePrint: VNFeaturePrintObservation?
+        private var _hasMatched = false
+        private var _wantsReferenceCapture = false
+        private var _isRegistrationMode = false
+        private var _lastSampleAt: Date = .distantPast
+        private var _consecutiveGoodFrames = 0
+
+        /// Require a few consecutive good frames so a lucky frame cannot pass.
+        let requiredGoodFrames = 3
+
+        var referencePrint: VNFeaturePrintObservation? {
+            get { lock.lock(); defer { lock.unlock() }; return _referencePrint }
+            set { lock.lock(); _referencePrint = newValue; lock.unlock() }
+        }
+        var threshold: Float {
+            get { lock.lock(); defer { lock.unlock() }; return _threshold }
+            set { lock.lock(); _threshold = newValue; lock.unlock() }
+        }
+        var hasMatched: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _hasMatched }
+            set { lock.lock(); _hasMatched = newValue; lock.unlock() }
+        }
+        var isRegistrationMode: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _isRegistrationMode }
+            set { lock.lock(); _isRegistrationMode = newValue; lock.unlock() }
+        }
+        func requestReferenceCapture() {
+            lock.lock(); _wantsReferenceCapture = true; lock.unlock()
+        }
+        /// Consumes the capture request, if one is pending.
+        func takeReferenceCaptureRequest() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            let wanted = _wantsReferenceCapture
+            _wantsReferenceCapture = false
+            return wanted
+        }
+        /// True if enough time has passed for another sample.
+        func shouldSample(now: Date, interval: TimeInterval) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard now.timeIntervalSince(_lastSampleAt) > interval else { return false }
+            _lastSampleAt = now
+            return true
+        }
+        /// Records a frame result; returns true when the match is confirmed.
+        func recordFrame(isGood: Bool) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if isGood {
+                _consecutiveGoodFrames += 1
+                if _consecutiveGoodFrames >= requiredGoodFrames {
+                    _hasMatched = true
+                    return true
+                }
+            } else {
+                _consecutiveGoodFrames = 0
+            }
+            return false
+        }
+        func reset() {
+            lock.lock()
+            _hasMatched = false
+            _consecutiveGoodFrames = 0
+            lock.unlock()
+        }
+    }
 
     override func configureOutputs() {
         guard session.canAddOutput(videoOutput) else { return }
@@ -246,81 +342,80 @@ public final class ObjectMissionController: CaptureController, AVCaptureVideoDat
             referenceLoaded = false
             return
         }
-        referencePrint = Self.featurePrint(for: cgImage)
-        referenceLoaded = referencePrint != nil
+        let print = Self.featurePrint(for: cgImage)
+        scan.referencePrint = print
+        referenceLoaded = print != nil
         #endif
     }
 
     /// Asks for the next frame to be saved as the reference photo.
     public func captureReference() {
-        wantsReferenceCapture = true
+        scan.requestReferenceCapture()
     }
 
     public func reset() {
+        scan.reset()
         hasMatched = false
         similarity = 0
-        consecutiveGoodFrames = 0
     }
 
+    /// Runs on the capture queue. Only the outcome hops to the main actor.
     public nonisolated func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard !scan.hasMatched else { return }
+        // Feature prints are expensive; three frames a second is plenty.
+        guard scan.shouldSample(now: Date(), interval: 0.33) else { return }
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let image = CIImage(cvPixelBuffer: buffer)
-        Task { @MainActor in self.process(image) }
-    }
+        guard let cgImage = scan.ciContext.createCGImage(image, from: image.extent) else { return }
 
-    private func process(_ image: CIImage) {
-        guard !hasMatched else { return }
-        // Feature prints are expensive; three frames a second is plenty.
-        guard Date().timeIntervalSince(lastSampleAt) > 0.33 else { return }
-        lastSampleAt = Date()
-
-        guard let cgImage = ciContext.createCGImage(image, from: image.extent) else { return }
-
-        if wantsReferenceCapture {
-            wantsReferenceCapture = false
+        if scan.takeReferenceCaptureRequest() {
             #if canImport(UIKit)
-            if let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.85) {
-                referencePrint = Self.featurePrint(for: cgImage)
-                referenceLoaded = referencePrint != nil
-                HapticEngine.shared.success()
-                onCapturedReference?(data)
-            }
+            // The back camera delivers landscape buffers; the phone was held
+            // upright, so the saved photo is rotated to match.
+            let photo = UIImage(cgImage: cgImage, scale: 1, orientation: .right)
+            guard let data = photo.jpegData(compressionQuality: 0.85) else { return }
+            let print = Self.featurePrint(for: cgImage)
+            scan.referencePrint = print
+            Task { @MainActor in self.didCaptureReference(data: data, hasPrint: print != nil) }
             #endif
             return
         }
 
-        guard !isRegistrationMode, let reference = referencePrint else { return }
+        guard !scan.isRegistrationMode, let reference = scan.referencePrint else { return }
         guard let candidate = Self.featurePrint(for: cgImage) else { return }
 
         var distance = Float.greatestFiniteMagnitude
         do {
             try reference.computeDistance(&distance, to: candidate)
         } catch {
-            log.error("Feature distance failed: \(String(describing: error), privacy: .public)")
             return
         }
 
+        let isGood = distance <= scan.threshold
+        let matched = scan.recordFrame(isGood: isGood)
         // Map distance onto a 0...1 confidence for the on-screen meter.
         let normalised = max(0, min(1, 1 - Double(distance) / 1.4))
-        similarity = normalised
+        Task { @MainActor in self.didMeasure(similarity: normalised, matched: matched) }
+    }
 
-        if distance <= matchDistanceThreshold {
-            consecutiveGoodFrames += 1
-            if consecutiveGoodFrames >= requiredGoodFrames {
-                hasMatched = true
-                HapticEngine.shared.success()
-                onMatch?()
-            }
-        } else {
-            consecutiveGoodFrames = 0
+    private func didCaptureReference(data: Data, hasPrint: Bool) {
+        referenceLoaded = hasPrint
+        onCapturedReference?(data)
+    }
+
+    private func didMeasure(similarity value: Double, matched: Bool) {
+        similarity = value
+        if matched, !hasMatched {
+            hasMatched = true
+            onMatch?()
         }
     }
 
-    static func featurePrint(for cgImage: CGImage) -> VNFeaturePrintObservation? {
+    nonisolated static func featurePrint(for cgImage: CGImage) -> VNFeaturePrintObservation? {
         let request = VNGenerateImageFeaturePrintRequest()
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         do {

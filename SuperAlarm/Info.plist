@@ -30,7 +30,7 @@
 	<!-- Mission permissions. Each is only requested when a mission that needs
 	     it is actually used. -->
 	<key>NSCameraUsageDescription</key>
-	<string>The barcode and object-scan missions use the camera to check you have walked to the thing you registered.</string>
+	<string>SuperAlarm uses the camera for missions: scanning the barcode or object you registered, and counting push-ups and squats.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>The Face ID mission uses facial recognition to confirm you are properly awake before the alarm stops.</string>
 	<key>NSMotionUsageDescription</key>

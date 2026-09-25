@@ -8,8 +8,13 @@ struct MissionRunnerView: View {
     var isPreview: Bool = false
     var onComplete: () -> Void
     var onGiveUp: () -> Void
+    /// The configured time limit ran out. Distinct from giving up: the alarm
+    /// goes back to ringing, it does not stop.
+    var onTimeout: () -> Void
     /// Called with the new total after every passed round.
     var onProgress: ((Int) -> Void)?
+    /// Called on every wrong answer.
+    var onFailure: (() -> Void)?
 
     @StateObject private var session: MissionSession
     @State private var elapsed: Int = 0
@@ -28,13 +33,17 @@ struct MissionRunnerView: View {
         completedRounds: Int = 0,
         onComplete: @escaping () -> Void,
         onGiveUp: @escaping () -> Void,
-        onProgress: ((Int) -> Void)? = nil
+        onTimeout: @escaping () -> Void,
+        onProgress: ((Int) -> Void)? = nil,
+        onFailure: (() -> Void)? = nil
     ) {
         self.settings = settings
         self.isPreview = isPreview
         self.onComplete = onComplete
         self.onGiveUp = onGiveUp
+        self.onTimeout = onTimeout
         self.onProgress = onProgress
+        self.onFailure = onFailure
         _session = StateObject(
             wrappedValue: MissionSession(settings: settings, now: startedAt, completedRounds: completedRounds)
         )
@@ -61,17 +70,20 @@ struct MissionRunnerView: View {
             // view — which owns the session — and leaking it along with its
             // one-second timer.
             let complete = onComplete
-            let giveUp = onGiveUp
+            let timeout = onTimeout
             let progress = onProgress
+            let failure = onFailure
             session.onComplete = { complete() }
-            session.onTimeout = { giveUp() }
+            session.onTimeout = { timeout() }
             session.onProgress = { progress?($0) }
+            session.onFailure = { failure?() }
             session.startTimerIfNeeded()
         }
         .onDisappear {
             session.onComplete = nil
             session.onTimeout = nil
             session.onProgress = nil
+            session.onFailure = nil
             session.stopTimer()
         }
         .onReceive(tick) { _ in
@@ -84,7 +96,15 @@ struct MissionRunnerView: View {
             } onCancel: {
                 showingEscapeHatch = false
             }
-            .presentationDetents([.medium])
+            .presentationDetents([.medium, .large])
+            // A thumb drifting during the three-second hold must not hand
+            // the touch to the sheet and lose the typed phrase.
+            .interactiveDismissDisabled()
+        }
+        .onChange(of: session.isBlocked) { _, blocked in
+            if blocked {
+                AccessibilityNotification.Announcement("This mission cannot run. Escape hatch available.").post()
+            }
         }
     }
 
@@ -100,9 +120,10 @@ struct MissionRunnerView: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 15, weight: .black))
                             .foregroundStyle(SAColor.textSecondary)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 44, height: 44)
                             .background(Circle().fill(SAColor.surfaceElevated))
                     }
+                    .accessibilityLabel("Close preview")
                 }
 
                 Spacer()
@@ -113,8 +134,8 @@ struct MissionRunnerView: View {
                         .foregroundStyle(SAColor.textPrimary)
                     if let round = session.roundLabel {
                         Text(round)
-                            .font(SAFont.caption(12))
-                            .foregroundStyle(SAColor.accent)
+                            .font(SAFont.headline(15))
+                            .foregroundStyle(SAColor.accentText)
                     }
                 }
 
@@ -122,9 +143,13 @@ struct MissionRunnerView: View {
 
                 if let remaining = session.secondsRemaining {
                     Text("\(remaining)s")
-                        .font(SAFont.clock(17))
+                        .font(SAFont.clock(22))
                         .foregroundStyle(remaining <= 10 ? SAColor.danger : SAColor.textSecondary)
-                        .frame(width: 36)
+                        .frame(minWidth: 52, alignment: .trailing)
+                        .fixedSize()
+                        .accessibilityLabel("Time left")
+                        .accessibilityValue("\(remaining) seconds")
+                        .accessibilityAddTraits(.updatesFrequently)
                 } else if isPreview {
                     Color.clear.frame(width: 36, height: 36)
                 }
@@ -174,26 +199,37 @@ struct MissionRunnerView: View {
     @ViewBuilder
     private var footer: some View {
         let threshold = max(30, settings.escapeHatchAfterSeconds)
+        // A mission that cannot run at all offers the way out at once.
+        let hatchAvailable = elapsed >= threshold || session.isBlocked
 
-        VStack(spacing: 10) {
+        VStack(spacing: 6) {
             if session.failures > 0 {
                 Text(session.failures == 1 ? "1 mistake" : "\(session.failures) mistakes")
-                    .font(SAFont.caption(12))
-                    .foregroundStyle(SAColor.textTertiary)
+                    .font(SAFont.caption(13))
+                    .foregroundStyle(SAColor.textSecondary)
             }
 
-            if elapsed >= threshold {
+            if hatchAvailable {
                 Button {
                     showingEscapeHatch = true
                 } label: {
                     Label("Can't complete this?", systemImage: "lifepreserver")
                         .font(SAFont.caption(14))
                         .foregroundStyle(SAColor.textSecondary)
+                        .frame(minHeight: 44)
+                        .padding(.horizontal, 16)
+                        .contentShape(Rectangle())
                 }
+                .accessibilityHint("Opens the escape hatch, which turns off the alarm without finishing the mission")
                 .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: elapsed >= threshold)
+        .animation(.easeInOut(duration: 0.3), value: hatchAvailable)
+        .onChange(of: hatchAvailable) { _, available in
+            if available {
+                AccessibilityNotification.Announcement("Escape hatch available").post()
+            }
+        }
         .padding(.bottom, 14)
         .frame(minHeight: 44)
     }
@@ -210,6 +246,7 @@ struct EscapeHatchView: View {
     @State private var typed = ""
     @State private var holdProgress: Double = 0
     @State private var isHolding = false
+    @FocusState private var isFieldFocused: Bool
 
     private let holdDuration: Double = 3.0
     private let tick = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
@@ -223,19 +260,21 @@ struct EscapeHatchView: View {
         ZStack {
             SABackground()
 
+            ScrollView {
             VStack(spacing: 18) {
                 Image(systemName: "lifepreserver.fill")
                     .font(.system(size: 40, weight: .bold))
                     .foregroundStyle(SAColor.warning)
                     .padding(.top, 26)
+                    .accessibilityHidden(true)
 
                 Text("Give up on this mission?")
                     .font(SAFont.title(22))
                     .foregroundStyle(SAColor.textPrimary)
                     .multilineTextAlignment(.center)
 
-                Text("The alarm will stop. Type \"\(phrase)\" and hold the button.")
-                    .font(SAFont.body(14))
+                Text("The alarm will turn off. Type \"\(phrase)\", then hold the button for three seconds.")
+                    .font(SAFont.body(15))
                     .foregroundStyle(SAColor.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
@@ -245,6 +284,9 @@ struct EscapeHatchView: View {
                     .multilineTextAlignment(.center)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .focused($isFieldFocused)
+                    .submitLabel(.done)
+                    .accessibilityLabel("Give-up phrase")
                     .padding(14)
                     .background(SAColor.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay(
@@ -263,40 +305,68 @@ struct EscapeHatchView: View {
                             .frame(width: geometry.size.width * holdProgress)
                     }
 
-                    Text(isHolding ? "Keep holding…" : "Hold to give up")
+                    Text(holdLabel)
                         .font(SAFont.headline(17))
-                        .foregroundStyle(phraseMatches ? SAColor.textPrimary : SAColor.textTertiary)
+                        .foregroundStyle(phraseMatches ? SAColor.textPrimary : SAColor.textSecondary)
                 }
                 .frame(height: SAMetrics.buttonHeight)
                 .clipShape(RoundedRectangle(cornerRadius: SAMetrics.buttonRadius, style: .continuous))
                 .padding(.horizontal, SAMetrics.screenPadding)
                 .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if phraseMatches { isHolding = true } }
-                        .onEnded { _ in
-                            isHolding = false
-                            holdProgress = 0
-                        }
-                )
+                // A long press rather than a drag: the fill still animates
+                // while the finger is down, and a small drift no longer
+                // cancels the hold.
+                .onLongPressGesture(minimumDuration: holdDuration, maximumDistance: 60) {
+                    guard phraseMatches else { return }
+                    isHolding = false
+                    HapticEngine.shared.warning()
+                    onGiveUp()
+                } onPressingChanged: { pressing in
+                    guard phraseMatches else { return }
+                    isHolding = pressing
+                    if !pressing { holdProgress = 0 }
+                }
                 .disabled(!phraseMatches)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(phraseMatches ? "Give up and turn off the alarm" : "Give up (type the phrase first)")
+                .accessibilityHint("Requires the phrase above.")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction {
+                    // The three-second hold cannot be performed with
+                    // VoiceOver; the typed phrase is the friction.
+                    guard phraseMatches else { return }
+                    HapticEngine.shared.warning()
+                    onGiveUp()
+                }
 
                 Button("Keep trying") { onCancel() }
                     .font(SAFont.emphasis(16))
-                    .foregroundStyle(SAColor.accent)
+                    .foregroundStyle(SAColor.accentText)
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 24)
+                    .contentShape(Rectangle())
 
                 Spacer(minLength: 10)
+            }
+            }
+            .scrollDismissesKeyboard(.interactively)
+        }
+        .onAppear {
+            // Focus after the sheet has finished presenting; set on the
+            // first frame it is dropped.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                Task { @MainActor in isFieldFocused = true }
             }
         }
         .onReceive(tick) { _ in
             guard isHolding, phraseMatches else { return }
             holdProgress = min(1, holdProgress + 0.05 / holdDuration)
-            if holdProgress >= 1 {
-                isHolding = false
-                HapticEngine.shared.warning()
-                onGiveUp()
-            }
         }
+    }
+
+    private var holdLabel: String {
+        if isHolding { return "Keep holding…" }
+        return phraseMatches ? "Ready — hold to give up" : "Hold to give up"
     }
 }
 
@@ -304,6 +374,7 @@ struct EscapeHatchView: View {
 
 struct MathMissionView: View {
     @ObservedObject var session: MissionSession
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var problem: MathProblem = MathMission.generate(difficulty: .normal)
     @State private var entry = ""
@@ -319,11 +390,14 @@ struct MathMissionView: View {
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
                 .padding(.horizontal, 20)
+                .accessibilityLabel("Problem: \(problem.display)")
 
             Text(entry.isEmpty ? " " : entry)
                 .font(SAFont.clock(40))
-                .foregroundStyle(isWrong ? SAColor.danger : SAColor.accent)
-                .frame(height: 52)
+                .foregroundStyle(isWrong ? SAColor.danger : SAColor.accentText)
+                .frame(minHeight: 52)
+                .accessibilityLabel("Your answer")
+                .accessibilityValue(entry.isEmpty ? "empty" : entry)
                 .frame(minWidth: 160)
                 .padding(.horizontal, 22)
                 .background(SAColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -331,8 +405,8 @@ struct MathMissionView: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(isWrong ? SAColor.danger : Color.clear, lineWidth: 2)
                 )
-                .offset(x: isWrong ? -6 : 0)
-                .animation(.default.repeatCount(3, autoreverses: true).speed(6), value: isWrong)
+                .offset(x: isWrong && !reduceMotion ? -6 : 0)
+                .animation(reduceMotion ? nil : .default.repeatCount(3, autoreverses: true).speed(6), value: isWrong)
 
             Spacer(minLength: 0)
 
@@ -375,6 +449,7 @@ struct MathMissionView: View {
             session.registerFailure()
             // A wrong answer earns a fresh problem, so guessing is pointless.
             problem = MathMission.generate(difficulty: session.settings.difficulty)
+            AccessibilityNotification.Announcement("Wrong. New problem: \(problem.display)").post()
         }
     }
 }
@@ -399,11 +474,13 @@ struct NumberPad: View {
             }
             HStack(spacing: 10) {
                 iconKey("delete.left.fill", tint: SAColor.textSecondary) { onDelete() }
+                    .accessibilityLabel("Delete")
                 key("0") { onDigit("0") }
                 iconKey("checkmark", tint: SAColor.onAccent, background: canSubmit ? SAColor.accent : SAColor.surfaceElevated) {
                     onSubmit()
                 }
                 .disabled(!canSubmit)
+                .accessibilityLabel("Submit answer")
             }
         }
     }
@@ -452,7 +529,7 @@ struct MemoryMissionView: View {
         VStack(spacing: 20) {
             Text(isShowingPattern ? "Memorise the pattern" : "Tap the tiles you saw")
                 .font(SAFont.headline(19))
-                .foregroundStyle(isShowingPattern ? SAColor.accent : SAColor.textPrimary)
+                .foregroundStyle(isShowingPattern ? SAColor.accentText : SAColor.textPrimary)
 
             Text("\(tapped.count) of \(round.litTiles.count)")
                 .font(SAFont.body(14))
@@ -460,7 +537,7 @@ struct MemoryMissionView: View {
                 .opacity(isShowingPattern ? 0 : 1)
 
             grid
-                .padding(.horizontal, 24)
+                .padding(.horizontal, SAMetrics.screenPadding)
 
             Spacer(minLength: 0)
         }
@@ -474,7 +551,7 @@ struct MemoryMissionView: View {
             count: round.gridSize
         )
 
-        return LazyVGrid(columns: columns, spacing: 10) {
+        return LazyVGrid(columns: columns, spacing: 8) {
             ForEach(0..<round.tileCount, id: \.self) { index in
                 tile(at: index)
             }
@@ -493,15 +570,20 @@ struct MemoryMissionView: View {
             return SAColor.surface
         }()
 
-        return RoundedRectangle(cornerRadius: 14, style: .continuous)
+        return RoundedRectangle(cornerRadius: 16, style: .continuous)
             .fill(fill)
             .aspectRatio(1, contentMode: .fit)
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(SAColor.separator, lineWidth: 1)
             )
             .onTapGesture { handleTap(index) }
             .animation(.easeOut(duration: 0.18), value: fill)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Tile \(index + 1) of \(round.tileCount)")
+            .accessibilityValue(isShowingPattern && isLit ? "lit" : (isTapped ? "selected" : ""))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { handleTap(index) }
     }
 
     private func startRound() {
@@ -510,7 +592,16 @@ struct MemoryMissionView: View {
         wrongTile = nil
         isShowingPattern = true
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + round.previewSeconds) {
+        // VoiceOver cannot scan a grid in two seconds: read the lit tiles
+        // out and give a much longer look.
+        let voiceOver = UIAccessibility.isVoiceOverRunning
+        if voiceOver {
+            let numbers = round.litTiles.sorted().map { String($0 + 1) }.joined(separator: ", ")
+            AccessibilityNotification.Announcement("Memorise tiles \(numbers)").post()
+        }
+        let preview = voiceOver ? max(8, round.previewSeconds * 3) : round.previewSeconds
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + preview) {
             Task { @MainActor in
                 withAnimation { isShowingPattern = false }
             }
@@ -554,8 +645,8 @@ struct TypingMissionView: View {
     var body: some View {
         VStack(spacing: 22) {
             Text("Type this exactly")
-                .font(SAFont.caption(13))
-                .foregroundStyle(SAColor.textTertiary)
+                .font(SAFont.caption(14))
+                .foregroundStyle(SAColor.textSecondary)
 
             Text(phrase.text)
                 .font(SAFont.headline(22))
@@ -593,30 +684,37 @@ struct TypingMissionView: View {
 
             if !isValidPrefix {
                 Text("That does not match — check the last character.")
-                    .font(SAFont.body(13))
+                    .font(SAFont.body(14))
                     .foregroundStyle(SAColor.danger)
+            } else {
+                Text("It passes the moment the phrase matches.")
+                    .font(SAFont.body(14))
+                    .foregroundStyle(SAColor.textSecondary)
             }
-
-            Button("Submit") { submit() }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(!isComplete)
-                .opacity(isComplete ? 1 : 0.45)
-                .padding(.horizontal, SAMetrics.screenPadding)
 
             Spacer(minLength: 0)
         }
         .padding(.top, 8)
         .onAppear {
             phrase = TypingMission.generate(difficulty: session.settings.difficulty)
-            isFocused = true
+            // Focus after the cover has finished presenting; set on the
+            // first frame it is dropped.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                Task { @MainActor in isFocused = true }
+            }
+        }
+        // No Submit button to reach under the keyboard on a small phone: a
+        // matching phrase passes by itself.
+        .onChange(of: typed) { _, _ in
+            if isComplete { submit() }
+        }
+        .onChange(of: isValidPrefix) { wasValid, isValid in
+            if wasValid, !isValid { session.registerFailure() }
         }
     }
 
     private func submit() {
-        guard isComplete else {
-            session.registerFailure()
-            return
-        }
+        guard isComplete else { return }
         typed = ""
         session.passRound()
         if !session.isComplete {

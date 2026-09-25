@@ -34,6 +34,9 @@ struct RingContainerView: View {
         .animation(.easeInOut(duration: 0.25), value: runtime.phase)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        // A propped-up phone counting push-ups must not auto-lock halfway.
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
     @ViewBuilder
@@ -51,7 +54,10 @@ struct RingContainerView: View {
                     runtime.registerMissionFailure()
                     runtime.completeMission()
                 },
-                onProgress: { runtime.noteMissionProgress(completedRounds: $0) }
+                // Running out of time is not a way out: back to ringing.
+                onTimeout: { runtime.cancelMission() },
+                onProgress: { runtime.noteMissionProgress(completedRounds: $0) },
+                onFailure: { runtime.registerMissionFailure() }
             )
             // Keyed on the mission start so a resumed mission is built once,
             // from the persisted progress, rather than on every render.

@@ -46,10 +46,13 @@ public extension Color {
 /// heavy geometric rounded typeface. Dark is the primary appearance; light
 /// mode swaps black for cream and keeps the same yellow.
 public enum SAColor {
-    /// The signature accent. Identical in both appearances.
+    /// The signature accent. Identical in both appearances. For fills and
+    /// icons; as text on the light cream it is unreadable — use `accentText`.
     public static let accent = Color(hex: 0xFFD400)
     public static let accentDim = Color(hex: 0xE0BB00)
     public static let onAccent = Color(hex: 0x0A0A0A)
+    /// The accent as text: yellow on black, a deep amber on cream.
+    public static let accentText = Color(light: 0x7A5F00, dark: 0xFFD400)
 
     public static let background = Color(light: 0xF6F1E4, dark: 0x000000)
     /// Cards and grouped rows.
@@ -60,14 +63,18 @@ public enum SAColor {
 
     public static let textPrimary = Color(light: 0x101010, dark: 0xFFFFFF)
     public static let textSecondary = Color(light: 0x6B6659, dark: 0x9A9A9E)
-    public static let textTertiary = Color(light: 0x9C9686, dark: 0x636366)
+    /// Meets 4.5:1 on both backgrounds; the previous values did not, and
+    /// this is the colour of the small lines a half-asleep user reads.
+    public static let textTertiary = Color(light: 0x7A7566, dark: 0x8E8E93)
     public static let textOnInverted = Color(light: 0xF6F1E4, dark: 0x101010)
 
     public static let separator = Color(light: 0xE3DCCB, dark: 0x2A2A2C)
 
-    public static let success = Color(hex: 0x32D74B)
-    public static let warning = Color(hex: 0xFF9F0A)
-    public static let danger = Color(hex: 0xFF453A)
+    /// Status colours: the system's dark-mode values on black, darker
+    /// variants on cream so they still read as text.
+    public static let success = Color(light: 0x1E8E3E, dark: 0x32D74B)
+    public static let warning = Color(light: 0xB86E00, dark: 0xFF9F0A)
+    public static let danger = Color(light: 0xD93025, dark: 0xFF453A)
 
     /// Cream, used for callout cards on black backgrounds.
     public static let cream = Color(hex: 0xF6F1E4)

@@ -23,6 +23,9 @@ struct MotionMissionView: View {
         }
         .padding(.horizontal, SAMetrics.screenPadding)
         .onAppear(perform: start)
+        .onChange(of: engine.availability) { _, availability in
+            session.setBlocked(availability != .ready)
+        }
         .onDisappear {
             engine.onComplete = nil
             engine.onIncrement = nil
@@ -47,10 +50,15 @@ struct MotionMissionView: View {
                         .foregroundStyle(SAColor.textSecondary)
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Progress")
+            .accessibilityValue("\(engine.count) of \(engine.goal)")
+            .accessibilityAddTraits(.updatesFrequently)
 
             Image(systemName: session.settings.type.symbolName)
                 .font(.system(size: 34, weight: .bold))
                 .foregroundStyle(SAColor.accent)
+                .accessibilityHidden(true)
 
             Text(engine.hint.isEmpty ? session.settings.type.tagline : engine.hint)
                 .font(SAFont.headline(19))
@@ -72,6 +80,7 @@ struct MotionMissionView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 42, weight: .bold))
                 .foregroundStyle(SAColor.warning)
+                .accessibilityHidden(true)
 
             Text("This mission can't run")
                 .font(SAFont.title(22))
@@ -82,9 +91,9 @@ struct MotionMissionView: View {
                 .foregroundStyle(SAColor.textSecondary)
                 .multilineTextAlignment(.center)
 
-            Text("Use the escape hatch below to stop the alarm, then pick a different mission.")
-                .font(SAFont.body(13))
-                .foregroundStyle(SAColor.textTertiary)
+            Text("Use the escape hatch below to turn off the alarm, then pick a different mission.")
+                .font(SAFont.body(14))
+                .foregroundStyle(SAColor.textSecondary)
                 .multilineTextAlignment(.center)
         }
     }
@@ -96,6 +105,7 @@ struct MotionMissionView: View {
         let goal = session.settings.effectiveGoal
         engine.onComplete = { session.passRound() }
         engine.onIncrement = { _ in HapticEngine.shared.impact(.light) }
+        session.setBlocked(false)
 
         switch session.settings.type {
         // Steps are counted from the moment the mission began, not from when
@@ -127,37 +137,33 @@ struct BarcodeMissionView: View {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .strokeBorder(SAColor.accent, lineWidth: 4)
                     .frame(width: 250, height: 250)
+                    .accessibilityHidden(true)
 
                 Spacer()
 
                 VStack(spacing: 10) {
                     Text(session.settings.barcodeLabel ?? "Find your registered code")
                         .font(SAFont.headline(20))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(SAColor.cream)
 
                     if let mismatch = controller.mismatchMessage {
                         Text(mismatch)
-                            .font(SAFont.body(14))
+                            .font(SAFont.body(15))
                             .foregroundStyle(SAColor.warning)
                             .multilineTextAlignment(.center)
                     } else {
                         Text("Point the camera at the code you registered.")
-                            .font(SAFont.body(14))
-                            .foregroundStyle(.white.opacity(0.75))
-                            .multilineTextAlignment(.center)
-                    }
-
-                    if let error = controller.errorMessage {
-                        Text(error)
-                            .font(SAFont.body(13))
-                            .foregroundStyle(SAColor.danger)
+                            .font(SAFont.body(15))
+                            .foregroundStyle(SAColor.cream.opacity(0.8))
                             .multilineTextAlignment(.center)
                     }
                 }
                 .padding(20)
                 .frame(maxWidth: .infinity)
-                .background(.black.opacity(0.55))
+                .background(SAColor.ink.opacity(0.6))
             }
+
+            CameraStatusOverlay(isRunning: controller.isRunning, errorMessage: controller.errorMessage)
         }
         .task {
             // Locals, because a capture list cannot name a property directly
@@ -165,20 +171,74 @@ struct BarcodeMissionView: View {
             let controller = self.controller
             let session = self.session
             controller.expectedPayload = session.settings.barcodePayload
+            // On a match the round passes and the runner rebuilds this view
+            // with a fresh controller for the next round, so nothing here
+            // restarts the camera — two sessions on one camera fight.
             controller.onMatch = { [weak controller] _ in
-                guard let controller else { return }
-                controller.stop()
+                controller?.stop()
                 session.passRound()
-                if !session.isComplete {
-                    controller.reset()
-                    Task { await controller.start() }
-                }
             }
             await controller.start()
+        }
+        .onChange(of: controller.errorMessage) { _, message in
+            session.setBlocked(message != nil)
         }
         .onDisappear {
             controller.onMatch = nil
             controller.stop()
+        }
+    }
+}
+
+// MARK: - Camera status
+
+/// What the user sees over a black preview: that the camera is starting,
+/// or that it cannot start and why. Shared by every camera mission.
+struct CameraStatusOverlay: View {
+    let isRunning: Bool
+    let errorMessage: String?
+
+    var body: some View {
+        if let errorMessage {
+            VStack(spacing: 16) {
+                Image(systemName: "video.slash.fill")
+                    .font(.system(size: 42, weight: .bold))
+                    .foregroundStyle(SAColor.warning)
+                    .accessibilityHidden(true)
+                Text("Camera unavailable")
+                    .font(SAFont.title(22))
+                    .foregroundStyle(SAColor.cream)
+                Text(errorMessage)
+                    .font(SAFont.body(15))
+                    .foregroundStyle(SAColor.cream.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+                Text("Use the escape hatch below to turn off the alarm, then pick a different mission.")
+                    .font(SAFont.body(14))
+                    .foregroundStyle(SAColor.cream.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    Link("Open iPhone Settings", destination: url)
+                        .font(SAFont.emphasis(16))
+                        .foregroundStyle(SAColor.accent)
+                        .frame(minHeight: 44)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(SAColor.ink.opacity(0.9))
+        } else if !isRunning {
+            VStack(spacing: 14) {
+                ProgressView()
+                    .tint(SAColor.accent)
+                    .scaleEffect(1.4)
+                Text("Starting camera…")
+                    .font(SAFont.headline(19))
+                    .foregroundStyle(SAColor.cream)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(SAColor.ink.opacity(0.7))
+            .accessibilityElement(children: .combine)
         }
     }
 }
@@ -188,6 +248,8 @@ struct BarcodeMissionView: View {
 struct ObjectMissionView: View {
     @ObservedObject var session: MissionSession
     @StateObject private var controller = ObjectMissionController()
+    /// Decoded once; the meter redraws three times a second.
+    @State private var referenceImage: UIImage?
 
     var body: some View {
         ZStack {
@@ -199,23 +261,30 @@ struct ObjectMissionView: View {
                 Spacer()
                 meter
             }
+
+            CameraStatusOverlay(isRunning: controller.isRunning, errorMessage: controller.errorMessage)
         }
         .task {
             let controller = self.controller
             let session = self.session
             if let id = session.settings.objectImageID {
+                if let data = MissionAssetStore.shared.imageData(id: id) {
+                    referenceImage = UIImage(data: data)
+                }
                 controller.loadReference(imageID: id)
             }
+            session.setBlocked(!controller.referenceLoaded)
+            // The runner rebuilds this view with a fresh controller for the
+            // next round; restarting this one too would put two sessions on
+            // one camera.
             controller.onMatch = { [weak controller] in
-                guard let controller else { return }
-                controller.stop()
+                controller?.stop()
                 session.passRound()
-                if !session.isComplete {
-                    controller.reset()
-                    Task { await controller.start() }
-                }
             }
             await controller.start()
+        }
+        .onChange(of: controller.errorMessage) { _, message in
+            session.setBlocked(message != nil || !controller.referenceLoaded)
         }
         .onDisappear {
             controller.onMatch = nil
@@ -225,9 +294,7 @@ struct ObjectMissionView: View {
 
     @ViewBuilder
     private var referenceThumbnail: some View {
-        if let id = session.settings.objectImageID,
-           let data = MissionAssetStore.shared.imageData(id: id),
-           let image = UIImage(data: data) {
+        if let image = referenceImage {
             HStack(spacing: 12) {
                 Image(uiImage: image)
                     .resizable()
@@ -242,15 +309,29 @@ struct ObjectMissionView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Find this")
                         .font(SAFont.caption(12))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(SAColor.cream.opacity(0.75))
                     Text(session.settings.objectLabel ?? "Registered object")
                         .font(SAFont.emphasis(16))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(SAColor.cream)
                 }
                 Spacer()
+
+                if controller.hasTorch {
+                    Button {
+                        controller.setTorch(!controller.isTorchOn)
+                    } label: {
+                        Image(systemName: controller.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(controller.isTorchOn ? SAColor.onAccent : SAColor.cream)
+                            .frame(width: 44, height: 44)
+                            .background(Circle().fill(controller.isTorchOn ? SAColor.accent : SAColor.cream.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(controller.isTorchOn ? "Turn torch off" : "Turn torch on")
+                }
             }
             .padding(14)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(SAColor.ink.opacity(0.6), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .padding(.horizontal, SAMetrics.screenPadding)
             .padding(.top, 10)
         }
@@ -259,42 +340,41 @@ struct ObjectMissionView: View {
     private var meter: some View {
         VStack(spacing: 12) {
             if !controller.referenceLoaded {
-                Text("The reference photo is missing. Use the escape hatch below and register it again.")
-                    .font(SAFont.body(14))
+                Text("The reference photo is missing. Use the escape hatch below to turn off the alarm, then register it again.")
+                    .font(SAFont.body(15))
                     .foregroundStyle(SAColor.warning)
                     .multilineTextAlignment(.center)
             } else {
-                Text("Match")
-                    .font(SAFont.caption(12))
-                    .foregroundStyle(.white.opacity(0.7))
+                Text("Match: \(Int((controller.similarity * 100).rounded()))%")
+                    .font(SAFont.headline(18))
+                    .foregroundStyle(SAColor.cream)
+                    .monospacedDigit()
 
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(.white.opacity(0.25))
+                        Capsule().fill(SAColor.cream.opacity(0.25))
                         Capsule()
                             .fill(controller.similarity > 0.7 ? SAColor.success : SAColor.accent)
                             .frame(width: geometry.size.width * controller.similarity)
                             .animation(.easeOut(duration: 0.2), value: controller.similarity)
                     }
                 }
-                .frame(height: 12)
+                .frame(height: 14)
                 .padding(.horizontal, 40)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Match")
+                .accessibilityValue("\(Int((controller.similarity * 100).rounded())) percent")
+                .accessibilityAddTraits(.updatesFrequently)
 
-                Text("Line the object up the way you photographed it.")
-                    .font(SAFont.body(14))
-                    .foregroundStyle(.white.opacity(0.75))
-            }
-
-            if let error = controller.errorMessage {
-                Text(error)
-                    .font(SAFont.body(13))
-                    .foregroundStyle(SAColor.danger)
+                Text("Line the object up the way you photographed it — same distance, same light.")
+                    .font(SAFont.body(15))
+                    .foregroundStyle(SAColor.cream.opacity(0.8))
                     .multilineTextAlignment(.center)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity)
-        .background(.black.opacity(0.55))
+        .background(SAColor.ink.opacity(0.6))
     }
 }
 
@@ -312,21 +392,24 @@ struct FaceIDMissionView: View {
             Spacer(minLength: 0)
 
             Image(systemName: BiometricMission.symbolName)
-                .font(.system(size: 78, weight: .light))
+                .font(.system(size: 78, weight: .bold))
                 .foregroundStyle(SAColor.accent)
+                .accessibilityHidden(true)
 
-            Text("Scan your face")
+            Text(BiometricMission.displayName == "Face ID" ? "Scan your face" : "Use \(BiometricMission.displayName)")
                 .font(SAFont.title(24))
                 .foregroundStyle(SAColor.textPrimary)
 
-            Text("Sit up and look straight at the phone.")
+            Text(BiometricMission.displayName == "Face ID"
+                 ? "Sit up and look straight at the phone."
+                 : "Sit up and rest your finger on the sensor.")
                 .font(SAFont.body(15))
                 .foregroundStyle(SAColor.textSecondary)
                 .multilineTextAlignment(.center)
 
             if let message {
                 Text(message)
-                    .font(SAFont.body(14))
+                    .font(SAFont.body(15))
                     .foregroundStyle(isBlocked ? SAColor.warning : SAColor.danger)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
@@ -338,15 +421,15 @@ struct FaceIDMissionView: View {
                 Button {
                     Task { await authenticate() }
                 } label: {
-                    Text(isRunning ? "Scanning…" : "Scan \(BiometricMission.displayName)")
+                    Text(isRunning ? "Scanning…" : "Use \(BiometricMission.displayName)")
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(isRunning)
                 .padding(.horizontal, SAMetrics.screenPadding)
             } else {
-                Text("Use the escape hatch below to stop the alarm.")
-                    .font(SAFont.body(13))
-                    .foregroundStyle(SAColor.textTertiary)
+                Text("Use the escape hatch below to turn off the alarm.")
+                    .font(SAFont.body(14))
+                    .foregroundStyle(SAColor.textSecondary)
                     .padding(.bottom, 10)
             }
         }
@@ -354,6 +437,9 @@ struct FaceIDMissionView: View {
             // Go straight into the scan rather than making a half-asleep user
             // find a button first.
             await authenticate()
+        }
+        .onChange(of: isBlocked) { _, blocked in
+            session.setBlocked(blocked)
         }
     }
 
@@ -441,14 +527,18 @@ struct BarcodeRegistrationView: View {
             }
         }
         .task {
+            let register = onRegister
             controller.expectedPayload = nil
-            controller.onMatch = { payload in
-                controller.stop()
-                onRegister(payload)
+            controller.onMatch = { [weak controller] payload in
+                controller?.stop()
+                register(payload)
             }
             await controller.start()
         }
-        .onDisappear { controller.stop() }
+        .onDisappear {
+            controller.onMatch = nil
+            controller.stop()
+        }
     }
 }
 
@@ -508,6 +598,7 @@ struct ObjectRegistrationView: View {
                             .overlay(Circle().strokeBorder(SAColor.accent, lineWidth: 4).padding(-6))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Take photo")
                     .padding(.bottom, 6)
                 }
                 .padding(20)
@@ -516,15 +607,19 @@ struct ObjectRegistrationView: View {
             }
         }
         .task {
+            let register = onRegister
             controller.isRegistrationMode = true
-            controller.onCapturedReference = { data in
-                controller.stop()
+            controller.onCapturedReference = { [weak controller] data in
+                controller?.stop()
                 if let id = MissionAssetStore.shared.saveImageData(data) {
-                    onRegister(id)
+                    register(id)
                 }
             }
             await controller.start()
         }
-        .onDisappear { controller.stop() }
+        .onDisappear {
+            controller.onCapturedReference = nil
+            controller.stop()
+        }
     }
 }

@@ -39,15 +39,16 @@ struct PoseRepMissionView: View {
                 coaching
             }
 
-            if let error = controller.errorMessage {
-                permissionFallback(error)
-            }
+            CameraStatusOverlay(isRunning: controller.isRunning, errorMessage: controller.errorMessage)
         }
         .task {
             let missionSession = session
             controller.goal = missionSession.settings.effectiveGoal
             controller.onComplete = { missionSession.passRound() }
             await controller.start()
+        }
+        .onChange(of: controller.errorMessage) { _, message in
+            session.setBlocked(message != nil)
         }
         .onDisappear {
             controller.onComplete = nil
@@ -62,35 +63,51 @@ struct PoseRepMissionView: View {
         VStack(spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(controller.count)")
-                    .font(.system(size: 104, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
+                    .font(SAFont.display(104))
+                    .foregroundStyle(SAColor.cream)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.snappy(duration: 0.25), value: controller.count)
 
                 Text("/ \(controller.goal)")
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .font(SAFont.title(30))
+                    .foregroundStyle(SAColor.cream.opacity(0.6))
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Repetitions")
+            .accessibilityValue("\(controller.count) of \(controller.goal)")
+            .accessibilityAddTraits(.updatesFrequently)
 
             // Fills as you lower and empties as you push back up, so a
-            // half-rep is obvious before it fails to count.
+            // half-rep is obvious before it fails to count. Sized to read
+            // from the couple of metres the setup hint asks for.
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.2))
-                Capsule()
-                    .fill(controller.depth > 0.85 ? SAColor.success : SAColor.accent)
-                    .frame(width: max(6, 220 * controller.depth))
-                    .animation(.easeOut(duration: 0.12), value: controller.depth)
+                Capsule().fill(SAColor.cream.opacity(0.2))
+                GeometryReader { geometry in
+                    Capsule()
+                        .fill(controller.depth > 0.85 ? SAColor.success : SAColor.accent)
+                        .frame(width: max(12, geometry.size.width * controller.depth))
+                        .animation(.easeOut(duration: 0.12), value: controller.depth)
+                }
             }
-            .frame(width: 220, height: 8)
+            .frame(height: 22)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Depth")
+            .accessibilityValue(depthLabel)
 
             Text(depthLabel)
-                .font(SAFont.caption(12))
-                .foregroundStyle(.white.opacity(0.6))
+                .font(SAFont.headline(24))
+                .foregroundStyle(controller.isTrackingBody ? SAColor.cream : SAColor.warning)
         }
         .padding(.vertical, 22)
-        .padding(.horizontal, 34)
-        .background(.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity)
+        .background(SAColor.ink.opacity(0.5), in: RoundedRectangle(cornerRadius: SAMetrics.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: SAMetrics.cardRadius, style: .continuous)
+                .strokeBorder(SAColor.warning, lineWidth: controller.isTrackingBody ? 0 : 4)
+        )
+        .padding(.horizontal, SAMetrics.screenPadding)
         .padding(.top, 14)
     }
 
@@ -106,29 +123,31 @@ struct PoseRepMissionView: View {
 
     private var coaching: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(controller.isTrackingBody ? SAColor.success : SAColor.warning)
-                    .frame(width: 9, height: 9)
+            HStack(spacing: 10) {
+                Image(systemName: controller.isTrackingBody ? "eye.fill" : "eye.slash.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(controller.isTrackingBody ? SAColor.success : SAColor.warning)
+                    .accessibilityHidden(true)
                 Text(controller.isTrackingBody ? "Tracking you" : "Can't see you")
-                    .font(SAFont.caption(13))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .font(SAFont.headline(19))
+                    .foregroundStyle(SAColor.cream)
             }
 
             Text(controller.coaching)
-                .font(SAFont.headline(22))
-                .foregroundStyle(.white)
+                .font(SAFont.title(30))
+                .foregroundStyle(SAColor.cream)
                 .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.6)
 
             Text(setupHint)
-                .font(SAFont.body(13))
-                .foregroundStyle(.white.opacity(0.6))
+                .font(SAFont.body(14))
+                .foregroundStyle(SAColor.cream.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
         }
         .padding(.vertical, 18)
         .frame(maxWidth: .infinity)
-        .background(.black.opacity(0.55))
+        .background(SAColor.ink.opacity(0.6))
     }
 
     private var setupHint: String {
@@ -140,30 +159,6 @@ struct PoseRepMissionView: View {
         }
     }
 
-    // MARK: Permission fallback
-
-    private func permissionFallback(_ message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "video.slash.fill")
-                .font(.system(size: 42, weight: .bold))
-                .foregroundStyle(SAColor.warning)
-            Text("Camera unavailable")
-                .font(SAFont.title(22))
-                .foregroundStyle(.white)
-            Text(message)
-                .font(SAFont.body(15))
-                .foregroundStyle(.white.opacity(0.75))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 30)
-            Text("Use the escape hatch below to stop the alarm, then switch this alarm to motion counting or a different mission.")
-                .font(SAFont.body(13))
-                .foregroundStyle(.white.opacity(0.55))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 30)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.black.opacity(0.88))
-    }
 }
 
 // MARK: - Skeleton
@@ -192,16 +187,16 @@ private struct SkeletonOverlay: View {
                             path.move(to: place(start, in: size))
                             path.addLine(to: place(end, in: size))
                         }
-                        .stroke(SAColor.accent.opacity(0.9), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                        .stroke(SAColor.accent.opacity(0.9), style: StrokeStyle(lineWidth: 8, lineCap: .round))
                     }
                 }
 
                 ForEach(PoseJoint.allCases, id: \.self) { joint in
                     if let point = joints[joint] {
                         Circle()
-                            .fill(.white)
-                            .frame(width: 12, height: 12)
-                            .overlay(Circle().strokeBorder(SAColor.accent, lineWidth: 3))
+                            .fill(SAColor.cream)
+                            .frame(width: 18, height: 18)
+                            .overlay(Circle().strokeBorder(SAColor.accent, lineWidth: 4))
                             .position(place(point, in: size))
                     }
                 }
